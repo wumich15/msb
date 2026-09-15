@@ -143,6 +143,8 @@ export interface ReferenceSolutionPrivateRow {
   preparation_generation: number;
   state: ReferenceState;
   provenance: ReferenceProvenance;
+  /** Exactly as the learner pasted it, before extraction. */
+  submitted_text: string | null;
   artifact: ReferenceArtifact | null;
   check_result: CheckResult | null;
   source_urls: SourceCredit[];

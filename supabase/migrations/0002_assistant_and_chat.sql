@@ -89,6 +89,9 @@ create table public.reference_solutions (
   preparation_generation integer not null,
   state public.reference_state not null default 'PENDING',
   provenance public.reference_provenance not null,
+  -- Exactly as the learner pasted it, before extraction into the structured
+  -- artifact. Kept so a rejected submission can be shown back to them.
+  submitted_text text,
   -- Structured artifact: statement restatement, assumptions, notation, worked
   -- steps, boundary cases, conclusion. See src/lib/ai/schemas.ts.
   artifact jsonb,

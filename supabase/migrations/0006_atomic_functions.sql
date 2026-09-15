@@ -293,7 +293,8 @@ $$;
 create or replace function public.set_preparation_choice(
   p_problem_id uuid,
   p_choice public.preparation_choice,
-  p_expected_statement_version integer
+  p_expected_statement_version integer,
+  p_submitted_text text default null
 )
 returns jsonb
 language plpgsql
@@ -308,6 +309,8 @@ declare
   v_preparation integer;
   v_state public.preparation_state;
   v_job_id uuid;
+  v_reference_id uuid;
+  v_reusable record;
 begin
   if v_user is null then
     raise exception 'UNAUTHENTICATED' using errcode = 'P0001';
@@ -363,11 +366,59 @@ begin
      and preparation_generation < v_preparation
      and state in ('PENDING', 'CHECKING');
 
+  -- A pasted solution is stored immediately so the job payload carries only ids.
+  if p_choice = 'provide' then
+    insert into public.reference_solutions (
+      user_id, problem_id, statement_version, activation_generation, preparation_generation,
+      state, provenance, submitted_text)
+    values (v_user, p_problem_id, v_statement_version, v_activation, v_preparation,
+            'PENDING', 'user_supplied', p_submitted_text)
+    returning id into v_reference_id;
+  end if;
+
+  -- Reuse copies the still-valid checked reference forward under the new
+  -- generations, so the gate's equality checks stay exact rather than special-cased.
+  if p_choice = 'reuse' then
+    select * into v_reusable from public.reference_solutions
+     where problem_id = p_problem_id and user_id = v_user
+       and statement_version = v_statement_version
+       and state = 'READY' and reported_at is null
+     order by created_at desc limit 1;
+
+    if not found then
+      raise exception 'SOLUTION_NOT_READY' using errcode = 'P0006', detail = 'no_reusable_reference';
+    end if;
+
+    insert into public.reference_solutions (
+      user_id, problem_id, statement_version, activation_generation, preparation_generation,
+      state, provenance, artifact, check_result, source_urls, attribution,
+      model_versions, prompt_versions, submitted_text)
+    values (v_user, p_problem_id, v_statement_version, v_activation, v_preparation,
+            'READY', v_reusable.provenance, v_reusable.artifact, v_reusable.check_result,
+            v_reusable.source_urls, v_reusable.attribution, v_reusable.model_versions,
+            v_reusable.prompt_versions, v_reusable.submitted_text)
+    returning id into v_reference_id;
+
+    update public.assistant_sessions
+       set selected_reference_id = v_reference_id,
+           selected_reference_revision = 1,
+           preparation_state = 'READY'
+     where problem_id = p_problem_id and user_id = v_user;
+
+    return jsonb_build_object(
+      'activation_generation', v_activation,
+      'preparation_generation', v_preparation,
+      'preparation_state', 'READY',
+      'statement_version', v_statement_version,
+      'reference_id', v_reference_id,
+      'job_id', null);
+  end if;
+
   -- The preparation job is bound to this exact generation. Only a matching
   -- generation may later select a reference.
   v_job_id := public.enqueue_job(
     v_user, 'prepare-reference', p_problem_id,
-    jsonb_build_object('choice', p_choice),
+    jsonb_build_object('choice', p_choice, 'reference_id', v_reference_id),
     'prepare:' || p_problem_id::text || ':' || v_activation::text || ':' || v_preparation::text,
     v_activation, v_preparation, v_statement_version, null, 3, interval '15 minutes');
 
@@ -376,6 +427,7 @@ begin
     'preparation_generation', v_preparation,
     'preparation_state', v_state,
     'statement_version', v_statement_version,
+    'reference_id', v_reference_id,
     'job_id', v_job_id);
 end;
 $$;
@@ -474,5 +526,5 @@ grant execute on function public.create_problem(uuid, text, text, text, jsonb, u
 grant execute on function public.save_notes(uuid, integer, text) to authenticated;
 grant execute on function public.save_statement(uuid, integer, text) to authenticated;
 grant execute on function public.change_status(uuid, public.problem_status, integer, integer) to authenticated;
-grant execute on function public.set_preparation_choice(uuid, public.preparation_choice, integer) to authenticated;
+grant execute on function public.set_preparation_choice(uuid, public.preparation_choice, integer, text) to authenticated;
 grant execute on function public.set_assistant_enabled(uuid, boolean) to authenticated;
