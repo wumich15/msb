@@ -1,0 +1,396 @@
+/*
+ * Restrained monochrome. Times New Roman, black on white, thin black borders,
+ * underlined links, visible keyboard focus. Status is carried by text and
+ * outlined symbols, never by color alone.
+ */
+
+:root {
+  color-scheme: light;
+  --rule: #000;
+  --rule-soft: #767676;
+  --surface-muted: #f4f4f4;
+  --nav-width: 240px;
+  --assistant-width: 340px;
+  --space: 12px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 100%;
+}
+
+body,
+button,
+input,
+textarea,
+select {
+  font-family: "Times New Roman", Times, serif;
+  color: #000;
+  background: #fff;
+}
+
+body {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.55;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-weight: normal;
+  line-height: 1.25;
+  margin: 0 0 0.5em;
+}
+
+h1 { font-size: 1.5rem; }
+h2 { font-size: 1.25rem; }
+h3 { font-size: 1.05rem; }
+
+a {
+  color: #000;
+  text-decoration: underline;
+}
+
+a:hover { text-decoration-thickness: 2px; }
+
+:focus-visible {
+  outline: 2px solid #000;
+  outline-offset: 2px;
+}
+
+button,
+input,
+textarea,
+select {
+  font-size: 1rem;
+  border: 1px solid var(--rule);
+  border-radius: 0;
+  padding: 6px 10px;
+  background: #fff;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled,
+input:disabled,
+textarea:disabled {
+  color: var(--rule-soft);
+  border-color: var(--rule-soft);
+  cursor: not-allowed;
+}
+
+button.link-button {
+  border: none;
+  padding: 0;
+  text-decoration: underline;
+  background: none;
+}
+
+textarea {
+  width: 100%;
+  min-height: 8rem;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+fieldset {
+  border: 1px solid var(--rule);
+  margin: 0 0 var(--space);
+}
+
+legend { padding: 0 6px; }
+
+hr {
+  border: none;
+  border-top: 1px solid var(--rule);
+  margin: var(--space) 0;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ shell */
+
+.app-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space);
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.app-header h1 {
+  font-size: 1.1rem;
+  letter-spacing: 0.08em;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.app-header nav { display: flex; gap: 16px; }
+
+.workspace {
+  display: grid;
+  grid-template-columns: var(--nav-width) minmax(0, 1fr) var(--assistant-width);
+  min-height: calc(100vh - 42px);
+}
+
+.workspace[data-assistant-collapsed="true"] {
+  grid-template-columns: var(--nav-width) minmax(0, 1fr) 2.5rem;
+}
+
+.panel {
+  padding: var(--space) 16px;
+  min-width: 0;
+}
+
+.panel + .panel { border-left: 1px solid var(--rule); }
+
+.panel-projects { overflow-y: auto; }
+.panel-editor { display: flex; flex-direction: column; gap: var(--space); }
+.panel-assistant { display: flex; flex-direction: column; gap: 10px; }
+
+/* --------------------------------------------------------------- listings */
+
+.tree-list,
+.problem-list {
+  list-style: none;
+  margin: 0 0 var(--space);
+  padding: 0;
+}
+
+.tree-list li,
+.problem-list li { margin-bottom: 4px; }
+
+.row-button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  padding: 4px 6px;
+  background: none;
+}
+
+.row-button:hover { border-color: var(--rule-soft); }
+.row-button[aria-current="true"] {
+  border-color: var(--rule);
+  background: var(--surface-muted);
+}
+
+/* ---------------------------------------------------------------- status */
+
+.status-badge {
+  display: inline-block;
+  border: 1px solid var(--rule);
+  padding: 0 6px;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+/* Distinct outlined symbols so status never depends on color. */
+.status-badge::before { margin-right: 4px; }
+.status-badge[data-status="not_started"]::before { content: "\25CB"; }  /* open circle */
+.status-badge[data-status="in_progress"]::before { content: "\25D0"; }  /* half circle */
+.status-badge[data-status="complete"]::before { content: "\25C9"; }     /* filled ring */
+
+.save-state {
+  font-size: 0.85rem;
+  border-bottom: 1px dotted var(--rule-soft);
+}
+
+.save-state[data-state="failed"] { border-bottom-style: solid; font-weight: bold; }
+
+/* ---------------------------------------------------------------- editor */
+
+.editor-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.editor-tabs button {
+  border: 1px solid var(--rule);
+  border-bottom: none;
+  margin-right: -1px;
+  background: var(--surface-muted);
+}
+
+.editor-tabs button[aria-selected="true"] {
+  background: #fff;
+  font-weight: bold;
+}
+
+.markdown-preview {
+  border: 1px solid var(--rule);
+  padding: 10px 12px;
+  min-height: 8rem;
+  overflow-x: auto;
+}
+
+.markdown-preview pre {
+  overflow-x: auto;
+  border: 1px solid var(--rule-soft);
+  padding: 8px;
+}
+
+.math-error {
+  border: 1px solid var(--rule);
+  padding: 0 4px;
+  font-size: 0.85rem;
+}
+
+.math-error::before { content: "\26A0 "; }
+
+.scope-note {
+  font-size: 0.85rem;
+  border-left: 3px solid var(--rule);
+  padding-left: 8px;
+  margin: 0 0 var(--space);
+}
+
+/* ------------------------------------------------------------- assistant */
+
+.conversation {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 12rem;
+}
+
+.chat-turn {
+  border: 1px solid var(--rule);
+  padding: 8px 10px;
+}
+
+.chat-turn[data-role="user"] { border-style: dashed; }
+.chat-turn[data-historical="true"] { border-color: var(--rule-soft); color: #333; }
+
+.chat-meta {
+  font-size: 0.8rem;
+  color: #333;
+  display: block;
+  margin-bottom: 4px;
+}
+
+.notes-excerpt {
+  border: 1px solid var(--rule-soft);
+  padding: 6px 8px;
+  font-size: 0.9rem;
+  max-height: 7rem;
+  overflow-y: auto;
+}
+
+/* ------------------------------------------------------- recommendations */
+
+.recommendation-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: var(--space);
+}
+
+.recommendation-card {
+  border: 1px solid var(--rule);
+  padding: 10px 12px;
+}
+
+.recommendation-card h3 { margin-bottom: 4px; }
+
+.tentative-flag {
+  border: 1px solid var(--rule);
+  font-size: 0.8rem;
+  padding: 0 4px;
+}
+
+/* ------------------------------------------------------------------ misc */
+
+.notice {
+  border: 1px solid var(--rule);
+  padding: 8px 10px;
+  margin-bottom: var(--space);
+}
+
+.notice[data-tone="error"] { border-width: 2px; }
+
+.form-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.form-row label { white-space: nowrap; }
+
+.empty-state {
+  border: 1px dashed var(--rule-soft);
+  padding: var(--space);
+  font-size: 0.95rem;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th, td {
+  border: 1px solid var(--rule);
+  padding: 4px 8px;
+  text-align: left;
+}
+
+.table-scroll { overflow-x: auto; }
+
+/* ------------------------------------------------------- small screens */
+
+.panel-tabs { display: none; }
+
+@media (max-width: 900px) {
+  .workspace,
+  .workspace[data-assistant-collapsed="true"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .panel + .panel { border-left: none; border-top: 1px solid var(--rule); }
+
+  /* Projects, Notes and Assistant become tabs; drafts survive the switch
+     because the panels stay mounted and are hidden with an attribute. */
+  .panel-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .panel-tabs button {
+    flex: 1 1 0;
+    border: none;
+    border-right: 1px solid var(--rule);
+    background: var(--surface-muted);
+  }
+
+  .panel-tabs button[aria-selected="true"] { background: #fff; font-weight: bold; }
+  .panel[hidden] { display: none; }
+}
+
+@media print {
+  .panel-projects, .panel-assistant, .panel-tabs { display: none; }
+}
