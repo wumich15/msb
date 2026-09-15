@@ -4,9 +4,11 @@ import { accepted, assertRpcOk, assertSameOrigin, ok, parseBody, route } from "@
 import { similarSchema } from "@/lib/validation";
 import { createServiceClient } from "@/lib/db/service";
 import { projectRecommendation } from "@/lib/db/projections";
-import { reserveBudget, TOKEN_ESTIMATES } from "@/lib/ai/usage";
+import { releaseBudgetReservation, reserveBudget, TOKEN_ESTIMATES } from "@/lib/ai/usage";
 import { dispatchJobById } from "@/jobs/dispatch";
-import type { MathnetProblemRow, RecommendationItemRow, RecommendationRunRow } from "@/lib/db/types";
+import { profileHashFor } from "@/lib/mathnet/retrieval";
+import { versions } from "@/lib/config";
+import type { IdeaProfilePrivateRow, MathnetProblemRow, RecommendationItemRow, RecommendationRunRow } from "@/lib/db/types";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -28,11 +30,39 @@ export const POST = route(async (request: Request, { params }: Params) => {
   const service = createServiceClient();
 
   if (!body.refresh) {
-    const cached = await readCachedRun(service, userId, id, problem.current_statement_version);
+    const cacheInputs = await Promise.all([
+      service.from("problem_versions").select("statement_markdown").eq("problem_id", id).eq("version", problem.current_statement_version).maybeSingle(),
+      service.from("notes").select("revision").eq("problem_id", id).maybeSingle(),
+      service.from("problem_idea_profiles").select("*").eq("user_id", userId).eq("problem_id", id).eq("statement_version", problem.current_statement_version).order("created_at", { ascending: false }).limit(1).maybeSingle(),
+      service.from("mathnet_releases").select("id, index_version").eq("is_active", true).maybeSingle(),
+    ]);
+    for (const input of cacheInputs) assertRpcOk(input.error);
+    const [{ data: statement }, { data: notes }, { data: profile }, { data: release }] = cacheInputs;
+    const ideaProfile = profile as IdeaProfilePrivateRow | null;
+    const profileHash = profileHashFor({
+      problemId: id,
+      userId,
+      statement: statement?.statement_markdown ?? "",
+      statementVersion: problem.current_statement_version,
+      ideaIds: ideaProfile?.idea_ids ?? [],
+      mechanism: ideaProfile?.mechanism ?? null,
+      hasSolutionEvidence: ideaProfile?.evidence_kind === "checked_reference" || ideaProfile?.evidence_kind === "user_supplied_work",
+    });
+    const cached = await readCachedRun(
+      service,
+      userId,
+      id,
+      problem.current_statement_version,
+      notes?.revision ?? null,
+      profileHash,
+      release?.id ?? null,
+      release?.index_version ?? 0,
+    );
     if (cached) return ok(cached);
   }
 
-  await reserveBudget(userId, TOKEN_ESTIMATES["recommend-problems"]);
+  const reservation = TOKEN_ESTIMATES["recommend-problems"];
+  await reserveBudget(userId, reservation);
 
   // A manual search is an explicit request for AI processing, so it runs whatever
   // the automatic-recommendation preference says.
@@ -48,7 +78,18 @@ export const POST = route(async (request: Request, { params }: Params) => {
     p_statement_version: problem.current_statement_version,
     p_notes_revision: null,
   });
-  assertRpcOk(error);
+  try {
+    assertRpcOk(error);
+  } catch (enqueueError) {
+    await releaseBudgetReservation(userId, reservation);
+    throw enqueueError;
+  }
+  const { error: reservationError } = await service.from("jobs").update({ reserved_tokens: reservation }).eq("id", jobId as string);
+  if (reservationError) {
+    await releaseBudgetReservation(userId, reservation);
+    await service.from("jobs").update({ run_state: "CANCELLED", error_code: "INTERNAL_ERROR" }).eq("id", jobId as string);
+    throw reservationError;
+  }
 
   await dispatchJobById(jobId as string).catch(() => undefined);
   return accepted({ jobId, state: "QUEUED", items: [] });
@@ -59,27 +100,38 @@ async function readCachedRun(
   userId: string,
   problemId: string,
   statementVersion: number,
+  notesRevision: number | null,
+  profileHash: string,
+  releaseId: string | null,
+  indexVersion: number,
 ) {
-  const { data: runRow } = await service
+  let query = service
     .from("recommendation_runs")
     .select("*")
     .eq("user_id", userId)
     .eq("problem_id", problemId)
     .eq("statement_version", statementVersion)
+    .eq("profile_hash", profileHash)
+    .eq("index_version", indexVersion)
+    .eq("retrieval_version", versions.retrieval)
     .in("state", ["READY", "NO_MATCH"])
     .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .limit(1);
+  query = notesRevision === null ? query.is("notes_revision", null) : query.eq("notes_revision", notesRevision);
+  query = releaseId === null ? query.is("release_id", null) : query.eq("release_id", releaseId);
+  const { data: runRows, error: runError } = await query;
+  assertRpcOk(runError);
 
-  const run = runRow as RecommendationRunRow | null;
+  const run = ((runRows ?? [])[0] as RecommendationRunRow | undefined) ?? null;
   if (!run) return null;
 
-  const { data: itemRows } = await service
+  const { data: itemRows, error: itemError } = await service
     .from("recommendation_items")
     .select("*")
     .eq("run_id", run.id)
     .eq("user_id", userId)
     .order("rank");
+  assertRpcOk(itemError);
 
   // Saved and dismissed entries are refiltered on every read, not only at build time.
   const items = ((itemRows ?? []) as RecommendationItemRow[]).filter(
@@ -88,10 +140,11 @@ async function readCachedRun(
 
   if (items.length === 0) return { runId: run.id, state: run.state, items: [], cached: true };
 
-  const { data: problemRows } = await service
+  const { data: problemRows, error: problemError } = await service
     .from("mathnet_problems")
     .select("*")
     .in("id", items.map((item) => item.mathnet_problem_id));
+  assertRpcOk(problemError);
 
   const problems = new Map(((problemRows ?? []) as MathnetProblemRow[]).map((row) => [row.id, row]));
 

@@ -111,15 +111,20 @@ export function isSuperseded(job: JobRow, context: ProblemContext): boolean {
 }
 
 export async function setPreparationState(
-  problemId: string,
+  job: Pick<JobRow, "user_id" | "problem_id" | "activation_generation" | "preparation_generation" | "statement_version">,
   state: AssistantSessionRow["preparation_state"],
   message: string | null = null,
 ): Promise<void> {
+  if (!job.problem_id) return;
   const supabase = createServiceClient();
   await supabase
     .from("assistant_sessions")
     .update({ preparation_state: state, preparation_message: message })
-    .eq("problem_id", problemId);
+    .eq("problem_id", job.problem_id)
+    .eq("user_id", job.user_id)
+    .eq("activation_generation", job.activation_generation)
+    .eq("preparation_generation", job.preparation_generation)
+    .eq("statement_version", job.statement_version);
 }
 
 /** A wall-clock budget the preparation run shares across all of its steps. */
@@ -129,6 +134,8 @@ export class RunBudget {
 
   constructor(milliseconds: number) {
     this.deadline = Date.now() + milliseconds;
+    const timer = setTimeout(() => this.controller.abort(), milliseconds);
+    timer.unref?.();
   }
 
   get remaining(): number {

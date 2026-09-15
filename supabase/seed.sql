@@ -1,0 +1,3 @@
+-- Application data is user-owned and starts empty. MathNET releases are imported
+-- explicitly with `npm run mathnet:import`; the importer records provenance and
+-- never activates a release until indexing and validation finish.

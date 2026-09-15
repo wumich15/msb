@@ -25,7 +25,11 @@ export function failure(code: ErrorCode, detail?: string, extra?: Record<string,
 export async function assertSameOrigin(): Promise<void> {
   const headerList = await headers();
   const origin = headerList.get("origin");
-  if (!origin) return; // Same-origin navigations and server-side fetches omit it.
+  const fetchSite = headerList.get("sec-fetch-site");
+  if (fetchSite === "cross-site") throw new AppError("FORBIDDEN", "cross-origin request");
+  // Non-browser clients may omit Origin. Browser cross-site mutations are still
+  // rejected by Sec-Fetch-Site, while ordinary same-origin forms keep working.
+  if (!origin) return;
   const allowed = new Set([publicConfig.appOrigin]);
   const host = headerList.get("host");
   if (host) {

@@ -2,7 +2,7 @@ import { inngest, EVENT_NAME, type JobEventData } from "@/jobs/client";
 import { claimJob, finishJob, loadProblemContext } from "@/jobs/runtime";
 import { createServiceClient } from "@/lib/db/service";
 import { retrieveRelatedProblems, type RetrievalSource } from "@/lib/mathnet/retrieval";
-import { reconcileUsage, TOKEN_ESTIMATES } from "@/lib/ai/usage";
+import { reconcileJobUsage } from "@/lib/ai/usage";
 import { versions } from "@/lib/config";
 import type { IdeaProfilePrivateRow } from "@/lib/db/types";
 
@@ -29,6 +29,32 @@ export const recommendProblemsFunction = inngest.createFunction(
     }
 
     const trigger = (job.input.trigger as "completion" | "manual") ?? "manual";
+
+    // Completion retrieval waits for the profile built from the learner's final
+    // notes. This makes the dependency explicit instead of racing two jobs.
+    const dependencyId = job.input.depends_on_job_id as string | undefined;
+    if (dependencyId) {
+      let dependencyState: string | null = null;
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        const { data: dependency } = await supabase
+          .from("jobs")
+          .select("run_state")
+          .eq("id", dependencyId)
+          .eq("user_id", userId)
+          .maybeSingle();
+        dependencyState = dependency?.run_state ?? null;
+        if (dependencyState === "SUCCEEDED") break;
+        if (["FAILED", "CANCELLED", "TIMED_OUT"].includes(dependencyState ?? "")) break;
+        await step.sleep(`wait-for-classification-${attempt}`, "3s");
+      }
+      if (dependencyState !== "SUCCEEDED") {
+        await finishJob(jobId, "FAILED", {
+          errorCode: "UPSTREAM_UNAVAILABLE",
+          errorDetail: `classification dependency ended as ${dependencyState ?? "unknown"}`,
+        });
+        return { failed: true, dependencyState };
+      }
+    }
 
     // A newer completion, statement, or profile supersedes this run.
     if (job.statement_version !== null && job.statement_version !== context.problem.current_statement_version) {
@@ -86,11 +112,26 @@ export const recommendProblemsFunction = inngest.createFunction(
 
     try {
       const result = await retrieveRelatedProblems(source);
-      await reconcileUsage(
+      await reconcileJobUsage(
+        jobId,
         userId,
-        TOKEN_ESTIMATES["recommend-problems"],
+        job.reserved_tokens ?? 0,
         result.usage.inputTokens + result.usage.outputTokens,
       );
+
+      const fresh = await loadProblemContext(userId, problemId);
+      if (
+        !fresh ||
+        fresh.problem.current_statement_version !== source.statementVersion ||
+        fresh.notes?.revision !== context.notes?.revision
+      ) {
+        await supabase
+          .from("recommendation_runs")
+          .update({ state: "FAILED", error_code: "STALE_REQUEST", completed_at: new Date().toISOString() })
+          .eq("id", run.id);
+        await finishJob(jobId, "CANCELLED", { errorCode: "STALE_REQUEST" });
+        return { superseded: true };
+      }
 
       await supabase
         .from("recommendation_runs")

@@ -66,11 +66,12 @@ export function profileHashFor(source: RetrievalSource): string {
 
 async function activeRelease(): Promise<{ id: string; index_version: number } | null> {
   const supabase = createServiceClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("mathnet_releases")
     .select("id, index_version")
     .eq("is_active", true)
     .maybeSingle();
+  if (error) throw new Error(`active MathNET release lookup failed: ${error.message}`);
   return (data as { id: string; index_version: number } | null) ?? null;
 }
 
@@ -114,10 +115,11 @@ export async function retrieveRelatedProblems(source: RetrievalSource): Promise<
   }
 
   // Everything the learner has already seen, refiltered on every run.
-  const { data: exclusionData } = await supabase.rpc("mathnet_exclusions_for_user", {
+  const { data: exclusionData, error: exclusionError } = await supabase.rpc("mathnet_exclusions_for_user", {
     p_user_id: source.userId,
     p_problem_id: source.problemId,
   });
+  if (exclusionError) throw new Error(`MathNET exclusions failed: ${exclusionError.message}`);
   const exclusions = (exclusionData as string[] | null) ?? [];
 
   const ideaText = ideasToText(source.ideaIds, source.mechanism);
@@ -148,6 +150,9 @@ export async function retrieveRelatedProblems(source: RetrievalSource): Promise<
       p_exclude_ids: exclusions,
     }),
   ]);
+  for (const result of [byStatement, byIdea, byText]) {
+    if (result.error) throw new Error(`MathNET candidate retrieval failed: ${result.error.message}`);
+  }
 
   const fused = fuseRankedLists([
     { source: "statement", ids: rowIds(byStatement.data) },
@@ -160,20 +165,22 @@ export async function retrieveRelatedProblems(source: RetrievalSource): Promise<
   }
 
   const shortlist = fused.slice(0, limits.rerankCandidates);
-  const { data: problemRows } = await supabase
+  const { data: problemRows, error: problemError } = await supabase
     .from("mathnet_problems")
     .select("id, source_id, title, statement_markdown, topics, competition, country")
     .in("id", shortlist.map((candidate) => candidate.mathnetProblemId));
+  if (problemError) throw new Error(`MathNET candidate load failed: ${problemError.message}`);
 
   const problems = new Map(
     ((problemRows ?? []) as MathnetProblemRow[]).map((row) => [row.id, row]),
   );
 
   // Compact candidate profiles: solution text never enters this prompt.
-  const { data: profileRows } = await supabase
+  const { data: profileRows, error: profileError } = await supabase
     .from("mathnet_solution_data")
     .select("mathnet_problem_id, idea_ids, mechanism, confidence")
     .in("mathnet_problem_id", shortlist.map((candidate) => candidate.mathnetProblemId));
+  if (profileError) throw new Error(`MathNET profile load failed: ${profileError.message}`);
 
   const profiles = new Map(
     ((profileRows ?? []) as Array<{ mathnet_problem_id: string; idea_ids: string[]; mechanism: string | null; confidence: number }>)

@@ -10,6 +10,9 @@ export default defineConfig({
     globals: true,
   },
   resolve: {
-    alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
+    alias: {
+      "server-only": fileURLToPath(new URL("./tests/server-only.ts", import.meta.url)),
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
+    },
   },
 });

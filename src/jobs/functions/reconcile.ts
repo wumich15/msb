@@ -2,6 +2,8 @@ import { inngest } from "@/jobs/client";
 import { reconcileUndispatchedJobs } from "@/jobs/dispatch";
 import { createServiceClient } from "@/lib/db/service";
 import { limits } from "@/lib/config";
+import { reconcileJobUsage } from "@/lib/ai/usage";
+import type { JobRow } from "@/lib/db/types";
 
 /**
  * Closes the gap between a committed state change and a failed event delivery,
@@ -11,7 +13,39 @@ export const reconcileJobsFunction = inngest.createFunction(
   { id: "reconcile-pending-jobs", retries: 1, triggers: [{ cron: "*/2 * * * *" }] },
   async () => {
     const resent = await reconcileUndispatchedJobs();
-    return { resent };
+    const supabase = createServiceClient();
+    const now = new Date().toISOString();
+    const { data: timedOut } = await supabase
+      .from("jobs")
+      .update({ run_state: "TIMED_OUT", error_code: "JOB_EXPIRED" })
+      .in("run_state", ["QUEUED", "RUNNING"])
+      .lt("expires_at", now)
+      .select("*");
+    for (const job of (timedOut ?? []) as JobRow[]) {
+      if (job.job_type === "prepare-reference" && job.problem_id) {
+        await supabase
+          .from("assistant_sessions")
+          .update({ preparation_state: "BLOCKED", preparation_message: "Solution preparation timed out. You can retry." })
+          .eq("problem_id", job.problem_id)
+          .eq("user_id", job.user_id)
+          .eq("activation_generation", job.activation_generation)
+          .eq("preparation_generation", job.preparation_generation)
+          .eq("statement_version", job.statement_version);
+      }
+    }
+
+    const { data: abandoned } = await supabase
+      .from("jobs")
+      .select("*")
+      .gt("reserved_tokens", 0)
+      .eq("usage_reconciled", false)
+      .in("run_state", ["FAILED", "CANCELLED", "TIMED_OUT"])
+      .limit(100);
+    for (const job of (abandoned ?? []) as JobRow[]) {
+      await reconcileJobUsage(job.id, job.user_id, job.reserved_tokens, 0);
+    }
+
+    return { resent, reservationsReleased: abandoned?.length ?? 0 };
   },
 );
 

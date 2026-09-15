@@ -255,6 +255,8 @@ export interface JobRow {
   preparation_generation: number | null;
   statement_version: number | null;
   notes_revision: number | null;
+  reserved_tokens: number;
+  usage_reconciled: boolean;
   expires_at: string | null;
   created_at: string;
   updated_at: string;

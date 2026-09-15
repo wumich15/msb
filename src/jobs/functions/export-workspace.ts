@@ -66,7 +66,13 @@ export const exportWorkspaceFunction = inngest.createFunction(
         scopeId: exportRow.scope_id,
         includeReferences: exportRow.include_references,
         references,
-        revealedIdeaProblemIds: new Set(),
+        revealedIdeaProblemIds: new Set(
+          snapshot.problems
+            .filter((problem) => (snapshot.events.get(problem.id) ?? []).some((event) =>
+              event.kind === "reference_revealed" && event.statement_version === problem.current_statement_version,
+            ))
+            .map((problem) => problem.id),
+        ),
       });
 
       // Objects live under "<user_id>/…", which the storage policy keys on.

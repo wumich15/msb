@@ -23,15 +23,21 @@ export const publicConfig = {
   appOrigin: process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://localhost:3000",
 };
 
-export function serverConfig() {
+export function requestConfig() {
   return {
     supabaseUrl: required("NEXT_PUBLIC_SUPABASE_URL", process.env.NEXT_PUBLIC_SUPABASE_URL),
     supabasePublishableKey: required(
       "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
       process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
     ),
-    supabaseSecretKey: required("SUPABASE_SECRET_KEY", process.env.SUPABASE_SECRET_KEY),
     appOrigin: publicConfig.appOrigin,
+  };
+}
+
+export function serverConfig() {
+  return {
+    ...requestConfig(),
+    supabaseSecretKey: required("SUPABASE_SECRET_KEY", process.env.SUPABASE_SECRET_KEY),
   };
 }
 
@@ -72,6 +78,7 @@ export const limits = {
   selectionChars: 4_000,
   preparationWallClockMs: 5 * 60 * 1000,
   preparationTransientRetries: 2,
+  providerCallTimeoutMs: 60_000,
   maxMseQueries: 3,
   maxMseQuestions: 5,
   maxMseAnswersPerQuestion: 3,

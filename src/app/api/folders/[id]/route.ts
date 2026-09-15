@@ -3,6 +3,7 @@ import { requireOwnedFolder } from "@/lib/auth/ownership";
 import { assertRpcOk, assertSameOrigin, ok, parseBody, route } from "@/lib/http";
 import { folderUpdateSchema } from "@/lib/validation";
 import { AppError } from "@/lib/errors";
+import { createServiceClient } from "@/lib/db/service";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -13,7 +14,8 @@ export const PATCH = route(async (request: Request, { params }: Params) => {
   await requireOwnedFolder(supabase, id, userId);
 
   const body = await parseBody(request, folderUpdateSchema);
-  const { data, error } = await supabase
+  const service = createServiceClient();
+  const { data, error } = await service
     .from("folders")
     .update({ name: body.name })
     .eq("id", id)
@@ -46,7 +48,8 @@ export const DELETE = route(async (request: Request, { params }: Params) => {
     throw new AppError("INVALID_REQUEST", "folder_not_empty", { problemCount: count });
   }
 
-  const { error } = await supabase.from("folders").delete().eq("id", id).eq("user_id", userId);
+  const service = createServiceClient();
+  const { error } = await service.from("folders").delete().eq("id", id).eq("user_id", userId);
   assertRpcOk(error);
 
   return ok({ deleted: true, problemsDeleted: count ?? 0 });

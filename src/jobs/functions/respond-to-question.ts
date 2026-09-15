@@ -3,7 +3,7 @@ import { claimJob, finishJob, loadProblemContext } from "@/jobs/runtime";
 import { createServiceClient } from "@/lib/db/service";
 import { loadReferenceForWorker } from "@/lib/ai/reference-store";
 import { generateTutorResponse } from "@/lib/ai/tutor";
-import { reconcileUsage, TOKEN_ESTIMATES } from "@/lib/ai/usage";
+import { reconcileJobUsage } from "@/lib/ai/usage";
 import type { ChatMessageRow, TutorResponseMode } from "@/lib/db/types";
 
 /**
@@ -85,23 +85,35 @@ export const respondToQuestionFunction = inngest.createFunction(
       "operational"
     >;
 
-    const outcome = await generateTutorResponse({
-      statement: context.statement?.statement_markdown ?? "",
-      statementVersion: question.statement_version,
-      reference: reference.artifact,
-      // The snapshot captures what the learner meant when asking, even if they
-      // have kept editing since.
-      notesSnapshot: question.notes_snapshot ?? "",
-      notesRevision: question.notes_revision ?? 0,
-      selectedExcerpt: question.selected_excerpt,
-      question: question.content,
-      responseMode: requestedMode,
-      history: (history ?? []) as ChatMessageRow[],
-    });
+    let outcome: Awaited<ReturnType<typeof generateTutorResponse>>;
+    try {
+      outcome = await generateTutorResponse({
+        statement: context.statement?.statement_markdown ?? "",
+        statementVersion: question.statement_version,
+        reference: reference.artifact,
+        // The snapshot captures what the learner meant when asking, even if they
+        // have kept editing since.
+        notesSnapshot: question.notes_snapshot ?? "",
+        notesRevision: question.notes_revision ?? 0,
+        selectedExcerpt: question.selected_excerpt,
+        question: question.content,
+        responseMode: requestedMode,
+        history: (history ?? []) as ChatMessageRow[],
+      });
+    } catch (error) {
+      await reconcileJobUsage(jobId, userId, job.reserved_tokens ?? 0, 0);
+      await finishJob(jobId, "FAILED", {
+        errorCode: "UPSTREAM_UNAVAILABLE",
+        errorDetail: error instanceof Error ? error.message : "tutor failed",
+        needsBillingReconciliation: true,
+      });
+      return { failed: true };
+    }
 
-    await reconcileUsage(
+    await reconcileJobUsage(
+      jobId,
       userId,
-      TOKEN_ESTIMATES["respond-to-question"],
+      job.reserved_tokens ?? 0,
       outcome.usage.inputTokens + outcome.usage.outputTokens,
     );
 

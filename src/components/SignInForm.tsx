@@ -19,6 +19,7 @@ export default function SignInForm() {
 
   const linkError = params.get("error");
   const signedOut = params.get("signed_out") === "1";
+  const accountDeleted = params.get("account_deleted") === "1";
   const next = params.get("next") ?? "/workspace";
 
   async function submit(event: React.FormEvent) {
@@ -50,6 +51,7 @@ export default function SignInForm() {
         </p>
       ) : null}
       {signedOut ? <p className="notice">You are signed out. Local drafts on this device were cleared.</p> : null}
+      {accountDeleted ? <p className="notice">Your account and its saved data were deleted.</p> : null}
 
       {state === "sent" ? (
         <p className="notice" role="status">

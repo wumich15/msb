@@ -3,9 +3,10 @@ import { claimJob, finishJob, isSuperseded, loadProblemContext, RunBudget, setJo
 import { prepareReference } from "@/lib/ai/preparation";
 import { createReference, updateReference } from "@/lib/ai/reference-store";
 import { createServiceClient } from "@/lib/db/service";
-import { reconcileUsage, TOKEN_ESTIMATES } from "@/lib/ai/usage";
+import { reconcileJobUsage, reserveExistingJobBudget, TOKEN_ESTIMATES } from "@/lib/ai/usage";
 import { limits } from "@/lib/config";
 import type { ReferenceSolutionPrivateRow } from "@/lib/db/types";
+import { dispatchJobById } from "@/jobs/dispatch";
 
 /**
  * Prepares the reference solution the readiness gate requires.
@@ -57,19 +58,32 @@ export const prepareReferenceFunction = inngest.createFunction(
     }
 
     await setJobStage(jobId, choice === "provide" ? "validating" : "searching");
-    await setPreparationState(problemId, choice === "provide" ? "VALIDATING" : "SEARCHING_MSE");
+    await setPreparationState(job, choice === "provide" ? "VALIDATING" : "SEARCHING_MSE");
 
     const budget = new RunBudget(limits.preparationWallClockMs);
-    const outcome = await prepareReference({
-      choice,
-      statement: context.statement?.statement_markdown ?? "",
-      submittedText: reference?.submitted_text ?? null,
-      budget,
-    });
+    let outcome: Awaited<ReturnType<typeof prepareReference>>;
+    try {
+      outcome = await prepareReference({
+        choice,
+        statement: context.statement?.statement_markdown ?? "",
+        submittedText: reference?.submitted_text ?? null,
+        budget,
+      });
+    } catch (error) {
+      await reconcileJobUsage(jobId, userId, job.reserved_tokens ?? 0, 0);
+      await setPreparationState(job, "BLOCKED", "Could not prepare a solution. You can retry.");
+      await finishJob(jobId, "FAILED", {
+        errorCode: "UPSTREAM_UNAVAILABLE",
+        errorDetail: error instanceof Error ? error.message : "preparation failed",
+        needsBillingReconciliation: true,
+      });
+      return { failed: true };
+    }
 
-    await reconcileUsage(
+    await reconcileJobUsage(
+      jobId,
       userId,
-      TOKEN_ESTIMATES["prepare-reference"],
+      job.reserved_tokens ?? 0,
       outcome.usage.inputTokens + outcome.usage.outputTokens,
     );
 
@@ -88,7 +102,7 @@ export const prepareReferenceFunction = inngest.createFunction(
       if (reference) {
         await updateReference(reference.id, { state: "REJECTED", checkResult: outcome.check ?? null });
       }
-      await setPreparationState(problemId, "BLOCKED", outcome.message);
+      await setPreparationState(job, "BLOCKED", outcome.message);
       await finishJob(jobId, "FAILED", {
         errorCode: "PREPARATION_BLOCKED",
         errorDetail: outcome.stage,
@@ -153,7 +167,33 @@ export const prepareReferenceFunction = inngest.createFunction(
       await supabase
         .from("assistant_sessions")
         .update({ preparation_message: outcome.message })
-        .eq("problem_id", problemId);
+        .eq("problem_id", problemId)
+        .eq("user_id", userId)
+        .eq("activation_generation", job.activation_generation)
+        .eq("preparation_generation", job.preparation_generation)
+        .eq("statement_version", job.statement_version);
+    }
+
+    // A checked reference materially improves method classification. Enqueue it
+    // only after the guarded reference selection has succeeded.
+    const { data: classificationJobId } = await supabase.rpc("enqueue_job", {
+      p_user_id: userId,
+      p_job_type: "classify-problem",
+      p_problem_id: problemId,
+      p_input: { reason: "reference_ready", reference_id: stored.id },
+      p_idempotency_key: `classify:reference:${stored.id}`,
+      p_activation_generation: job.activation_generation,
+      p_preparation_generation: job.preparation_generation,
+      p_statement_version: job.statement_version,
+      p_notes_revision: fresh.notes?.revision ?? null,
+    });
+    if (classificationJobId) {
+      const classificationId = classificationJobId as string;
+      if (await reserveExistingJobBudget(classificationId, TOKEN_ESTIMATES["classify-problem"]).catch(() => false)) {
+        await dispatchJobById(classificationId);
+      } else {
+        await supabase.from("jobs").update({ run_state: "CANCELLED", error_code: "AI_LIMIT_REACHED" }).eq("id", classificationId);
+      }
     }
 
     await finishJob(jobId, "SUCCEEDED", {

@@ -24,9 +24,8 @@ export const GET = route(async (_request: Request, { params }: Params) => {
   if (!data) throw new AppError("NOT_FOUND");
 
   const job = projectJob(data as JobRow);
-  return ok({
-    job,
-    // Poll every two seconds while visible, then back off, then stop.
-    resultRef: job.state === "SUCCEEDED" ? ((data as JobRow).result ?? null) : null,
-  });
+  // Poll every two seconds while visible, then back off, then stop. Raw worker
+  // results are deliberately excluded because they can contain private IDs or
+  // provider metadata the browser does not need.
+  return ok({ job });
 });

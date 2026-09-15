@@ -25,5 +25,18 @@ export const POST = route(async (_request: Request, { params }: Params) => {
   }
 
   const revealed = await revealReference(userId, id);
+  const { data: problem } = await service
+    .from("problems")
+    .select("current_statement_version")
+    .eq("id", id)
+    .eq("user_id", userId)
+    .single();
+  await service.from("study_events").insert({
+    user_id: userId,
+    problem_id: id,
+    kind: "reference_revealed",
+    statement_version: problem?.current_statement_version ?? null,
+    detail: { explicit_spoiler_action: true },
+  });
   return ok({ reference: revealed });
 });

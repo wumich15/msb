@@ -213,6 +213,7 @@ declare
   v_notes text;
   v_event_id uuid;
   v_job_id uuid;
+  v_classification_job_id uuid;
   v_auto_recommend boolean;
 begin
   if v_user is null then
@@ -264,16 +265,17 @@ begin
   -- Completion enqueues recommendations once, in this same transaction. Failure
   -- of that job must never undo completion, so it is a separate durable record.
   if p_to_status = 'complete' and v_auto_recommend then
-    v_job_id := public.enqueue_job(
-      v_user, 'recommend-problems', p_problem_id,
-      jsonb_build_object('trigger', 'completion', 'event_id', v_event_id),
-      'recommend:' || p_problem_id::text || ':' || v_event_id::text,
-      null, null, v_statement_version, v_notes_revision);
-
-    perform public.enqueue_job(
+    v_classification_job_id := public.enqueue_job(
       v_user, 'classify-problem', p_problem_id,
       jsonb_build_object('reason', 'completion', 'event_id', v_event_id),
       'classify:' || p_problem_id::text || ':' || v_event_id::text,
+      null, null, v_statement_version, v_notes_revision);
+
+    v_job_id := public.enqueue_job(
+      v_user, 'recommend-problems', p_problem_id,
+      jsonb_build_object('trigger', 'completion', 'event_id', v_event_id,
+                         'depends_on_job_id', v_classification_job_id),
+      'recommend:' || p_problem_id::text || ':' || v_event_id::text,
       null, null, v_statement_version, v_notes_revision);
   end if;
 
@@ -282,7 +284,8 @@ begin
   return jsonb_build_object(
     'changed', true, 'status', p_to_status, 'from_status', v_from,
     'statement_version', v_statement_version, 'notes_revision', v_notes_revision,
-    'event_id', v_event_id, 'recommendation_job_id', v_job_id);
+    'event_id', v_event_id, 'classification_job_id', v_classification_job_id,
+    'recommendation_job_id', v_job_id);
 end;
 $$;
 

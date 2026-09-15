@@ -3,6 +3,8 @@ import { requireOwnedProblem } from "@/lib/auth/ownership";
 import { assertRpcOk, assertSameOrigin, ok, parseBody, route } from "@/lib/http";
 import { statusSchema } from "@/lib/validation";
 import { dispatchJobById } from "@/jobs/dispatch";
+import { reserveExistingJobBudget, TOKEN_ESTIMATES } from "@/lib/ai/usage";
+import { createServiceClient } from "@/lib/db/service";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -30,13 +32,28 @@ export const PATCH = route(async (request: Request, { params }: Params) => {
   const result = data as {
     changed: boolean;
     status: string;
+    classification_job_id?: string | null;
     recommendation_job_id?: string | null;
   };
 
+  const service = createServiceClient();
+  let classificationScheduled = !result.classification_job_id;
+  if (result.classification_job_id) {
+    const reserved = await reserveExistingJobBudget(result.classification_job_id, TOKEN_ESTIMATES["classify-problem"]).catch(() => false);
+    classificationScheduled = reserved;
+    if (reserved) await dispatchJobById(result.classification_job_id).catch(() => undefined);
+    else await service.from("jobs").update({ run_state: "CANCELLED", error_code: "AI_LIMIT_REACHED" }).eq("id", result.classification_job_id);
+  }
   if (result.recommendation_job_id) {
     // Recommendation generation may fail; completing the problem already succeeded.
-    await dispatchJobById(result.recommendation_job_id).catch(() => undefined);
+    const reserved = classificationScheduled && await reserveExistingJobBudget(result.recommendation_job_id, TOKEN_ESTIMATES["recommend-problems"]).catch(() => false);
+    if (reserved) await dispatchJobById(result.recommendation_job_id).catch(() => undefined);
+    else await service.from("jobs").update({ run_state: "CANCELLED", error_code: "AI_LIMIT_REACHED" }).eq("id", result.recommendation_job_id);
   }
 
-  return ok({ ...result, recommendationJobId: result.recommendation_job_id ?? null });
+  return ok({
+    ...result,
+    classificationJobId: result.classification_job_id ?? null,
+    recommendationJobId: result.recommendation_job_id ?? null,
+  });
 });

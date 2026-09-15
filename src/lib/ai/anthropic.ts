@@ -1,7 +1,7 @@
 import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { aiConfig } from "@/lib/config";
+import { aiConfig, limits } from "@/lib/config";
 import { AppError } from "@/lib/errors";
 
 /**
@@ -60,6 +60,9 @@ export async function callModelForJson<T extends z.ZodType>(
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
+      const signal = options.signal
+        ? AbortSignal.any([options.signal, AbortSignal.timeout(limits.providerCallTimeoutMs)])
+        : AbortSignal.timeout(limits.providerCallTimeoutMs);
       const response = await getClient().messages.create(
         {
           model: options.model,
@@ -71,7 +74,7 @@ export async function callModelForJson<T extends z.ZodType>(
             { role: "assistant", content: "{" },
           ],
         },
-        { signal: options.signal },
+        { signal },
       );
 
       const text = response.content
@@ -103,7 +106,7 @@ export async function callModelForJson<T extends z.ZodType>(
       if (!isTransient(error) || attempt === retries) break;
       // A timeout or aborted connection may already have been billed.
       ambiguous = true;
-      await delay(500 * 2 ** attempt);
+      await delay(500 * 2 ** attempt, options.signal);
     }
   }
 
@@ -136,8 +139,15 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message.slice(0, 200) : "provider call failed";
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    }, { once: true });
+  });
 }
 
 /**

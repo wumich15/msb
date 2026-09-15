@@ -2,7 +2,7 @@ import "server-only";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { serverConfig } from "@/lib/config";
+import { requestConfig } from "@/lib/config";
 
 /**
  * Request-scoped client carrying the signed-in user's session. Row-level security
@@ -10,7 +10,7 @@ import { serverConfig } from "@/lib/config";
  * or the server-only solution tables.
  */
 export async function createRequestClient(): Promise<SupabaseClient> {
-  const config = serverConfig();
+  const config = requestConfig();
   const cookieStore = await cookies();
 
   return createServerClient(config.supabaseUrl, config.supabasePublishableKey, {

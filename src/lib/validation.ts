@@ -79,11 +79,11 @@ export const recommendationFeedbackSchema = z.object({
   relevance: z.enum(["useful", "same_topic_only", "unrelated"]).optional(),
 });
 
-export const exportSchema = z.object({
-  scope: z.enum(["problem", "folder", "account"]),
-  scopeId: uuid.nullable().optional(),
-  includeReferences: z.boolean().default(false),
-});
+export const exportSchema = z.discriminatedUnion("scope", [
+  z.object({ scope: z.literal("problem"), scopeId: uuid, includeReferences: z.boolean().default(false) }),
+  z.object({ scope: z.literal("folder"), scopeId: uuid, includeReferences: z.boolean().default(false) }),
+  z.object({ scope: z.literal("account"), scopeId: z.null().optional(), includeReferences: z.boolean().default(false) }),
+]);
 
 export const settingsSchema = z.object({
   automaticRecommendations: z.boolean().optional(),

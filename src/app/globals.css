@@ -342,6 +342,32 @@ hr {
 
 .form-row label { white-space: nowrap; }
 
+.compact-form,
+.button-row,
+.section-heading,
+.problem-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.compact-form input { min-width: 0; flex: 1 1 7rem; }
+.compact-form label { flex-basis: 100%; }
+.section-heading { justify-content: space-between; }
+.section-heading h2 { margin: 0; }
+.problem-heading input { flex: 1 1 16rem; }
+.switch-label { display: block; }
+.preparation-status { border-bottom: 1px solid var(--rule); padding-bottom: 6px; }
+.revealed-reference { border: 2px solid var(--rule); padding: 10px 12px; }
+.disclosure,
+.global-notice { padding: 10px 16px; margin: 0; border-width: 0 0 1px; }
+.settings-page { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+.stacked-field { display: grid; gap: 4px; margin-bottom: 12px; }
+.danger-zone { margin-top: 24px; border: 2px solid var(--rule); padding: 12px; }
+.danger-zone input { display: block; width: 100%; margin: 6px 0 10px; }
+
 .empty-state {
   border: 1px dashed var(--rule-soft);
   padding: var(--space);

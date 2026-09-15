@@ -2,6 +2,7 @@ import { requireSession } from "@/lib/auth/session";
 import { assertRpcOk, assertSameOrigin, ok, parseBody, route } from "@/lib/http";
 import { folderCreateSchema } from "@/lib/validation";
 import type { FolderRow } from "@/lib/db/types";
+import { createServiceClient } from "@/lib/db/service";
 
 export const GET = route(async () => {
   const { supabase, userId } = await requireSession();
@@ -17,10 +18,11 @@ export const GET = route(async () => {
 
 export const POST = route(async (request: Request) => {
   await assertSameOrigin();
-  const { supabase, userId } = await requireSession();
+  const { userId } = await requireSession();
   const body = await parseBody(request, folderCreateSchema);
 
-  const { data, error } = await supabase
+  const service = createServiceClient();
+  const { data, error } = await service
     .from("folders")
     .insert({ user_id: userId, name: body.name })
     .select("id, name, created_at, updated_at")

@@ -1,5 +1,5 @@
 import "server-only";
-import { aiConfig } from "@/lib/config";
+import { aiConfig, limits } from "@/lib/config";
 import { AppError } from "@/lib/errors";
 
 /**
@@ -32,6 +32,9 @@ export async function embed(
     return { vectors: [], model: config.voyageModel, dimension: config.voyageDimension, totalTokens: 0 };
   }
 
+  const requestSignal = signal
+    ? AbortSignal.any([signal, AbortSignal.timeout(limits.providerCallTimeoutMs)])
+    : AbortSignal.timeout(limits.providerCallTimeoutMs);
   const response = await fetch(ENDPOINT, {
     method: "POST",
     headers: {
@@ -45,7 +48,7 @@ export async function embed(
       output_dimension: config.voyageDimension,
       truncation: true,
     }),
-    signal,
+    signal: requestSignal,
   });
 
   if (!response.ok) {

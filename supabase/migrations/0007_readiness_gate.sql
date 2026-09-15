@@ -353,7 +353,7 @@ begin
   if not found then
     return jsonb_build_object('ok', false, 'code', 'NOT_FOUND');
   end if;
-  if j.run_state in ('SUCCEEDED', 'CANCELLED') then
+  if j.run_state in ('SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT') then
     return jsonb_build_object('ok', false, 'code', 'ALREADY_TERMINAL', 'run_state', j.run_state);
   end if;
   if j.expires_at is not null and j.expires_at < now() then

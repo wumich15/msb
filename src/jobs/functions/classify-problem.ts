@@ -2,7 +2,7 @@ import { inngest, EVENT_NAME, type JobEventData } from "@/jobs/client";
 import { claimJob, finishJob, loadProblemContext } from "@/jobs/runtime";
 import { createServiceClient } from "@/lib/db/service";
 import { classifyProblem, classificationInputHash, safeTagsFrom, type EvidenceKind } from "@/lib/mathnet/classify";
-import { reconcileUsage, TOKEN_ESTIMATES } from "@/lib/ai/usage";
+import { reconcileJobUsage } from "@/lib/ai/usage";
 import type { ReferenceSolutionPrivateRow } from "@/lib/db/types";
 
 /**
@@ -91,12 +91,37 @@ export const classifyProblemFunction = inngest.createFunction(
       return { cached: true };
     }
 
-    const result = await classifyProblem(input);
-    await reconcileUsage(
+    let result: Awaited<ReturnType<typeof classifyProblem>>;
+    try {
+      result = await classifyProblem(input);
+    } catch (error) {
+      await reconcileJobUsage(jobId, userId, job.reserved_tokens ?? 0, 0);
+      await finishJob(jobId, "FAILED", {
+        errorCode: "UPSTREAM_UNAVAILABLE",
+        errorDetail: error instanceof Error ? error.message : "classification failed",
+        needsBillingReconciliation: true,
+      });
+      return { failed: true };
+    }
+    await reconcileJobUsage(
+      jobId,
       userId,
-      TOKEN_ESTIMATES["classify-problem"],
+      job.reserved_tokens ?? 0,
       result.usage.inputTokens + result.usage.outputTokens,
     );
+
+    const fresh = await loadProblemContext(userId, problemId);
+    if (
+      !fresh ||
+      fresh.problem.current_statement_version !== context.problem.current_statement_version ||
+      (job.notes_revision !== null && fresh.notes?.revision !== job.notes_revision)
+    ) {
+      await finishJob(jobId, "CANCELLED", {
+        errorCode: "STALE_REQUEST",
+        providerRequestIds: result.usage.requestIds,
+      });
+      return { superseded: true };
+    }
 
     const { data: inserted, error } = await supabase
       .from("problem_idea_profiles")

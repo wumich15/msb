@@ -3,8 +3,10 @@ import { requireOwnedProblem } from "@/lib/auth/ownership";
 import { accepted, assertRpcOk, assertSameOrigin, ok, parseBody, route } from "@/lib/http";
 import { messageSchema } from "@/lib/validation";
 import { projectChatMessage } from "@/lib/db/projections";
-import { reserveBudget, TOKEN_ESTIMATES } from "@/lib/ai/usage";
+import { releaseBudgetReservation, reserveBudget, TOKEN_ESTIMATES } from "@/lib/ai/usage";
 import { dispatchJobById } from "@/jobs/dispatch";
+import { createServiceClient } from "@/lib/db/service";
+import { AppError, isErrorCode } from "@/lib/errors";
 import type { ChatMessageRow } from "@/lib/db/types";
 
 type Params = { params: Promise<{ id: string }> };
@@ -52,18 +54,39 @@ export const POST = route(async (request: Request, { params }: Params) => {
   await requireOwnedProblem(supabase, id, userId);
   const body = await parseBody(request, messageSchema);
 
-  await reserveBudget(userId, TOKEN_ESTIMATES["respond-to-question"]);
-
-  const { data, error } = await supabase.rpc("create_chat_request", {
+  // Reject pre-ready requests before reserving quota. create_chat_request repeats
+  // this gate in its transaction to close the race with a changed reference.
+  const service = createServiceClient();
+  const { data: gate, error: gateError } = await service.rpc("tutor_gate", {
     p_problem_id: id,
-    p_request_id: body.requestId,
-    p_question: body.question,
-    p_expected_notes_revision: body.expectedNotesRevision,
-    p_selected_excerpt: body.selectedExcerpt ?? null,
-    p_response_mode: body.responseMode,
-    p_thread_id: null,
+    p_user_id: userId,
   });
-  assertRpcOk(error);
+  assertRpcOk(gateError);
+  const verdict = gate as { ok?: boolean; code?: string; reason?: string } | null;
+  if (!verdict?.ok) {
+    throw new AppError(isErrorCode(verdict?.code) ? verdict.code : "SOLUTION_NOT_READY", verdict?.reason);
+  }
+
+  const reservation = TOKEN_ESTIMATES["respond-to-question"];
+  await reserveBudget(userId, reservation);
+
+  let data: unknown;
+  try {
+    const created = await supabase.rpc("create_chat_request", {
+      p_problem_id: id,
+      p_request_id: body.requestId,
+      p_question: body.question,
+      p_expected_notes_revision: body.expectedNotesRevision,
+      p_selected_excerpt: body.selectedExcerpt ?? null,
+      p_response_mode: body.responseMode,
+      p_thread_id: null,
+    });
+    assertRpcOk(created.error);
+    data = created.data;
+  } catch (error) {
+    await releaseBudgetReservation(userId, reservation);
+    throw error;
+  }
 
   const result = data as {
     duplicate: boolean;
@@ -72,6 +95,17 @@ export const POST = route(async (request: Request, { params }: Params) => {
     thread_id?: string;
     notes_revision?: number;
   };
+
+  if (result.duplicate || !result.job_id) {
+    await releaseBudgetReservation(userId, reservation);
+  } else {
+    const { error: reservationError } = await service.from("jobs").update({ reserved_tokens: reservation }).eq("id", result.job_id);
+    if (reservationError) {
+      await releaseBudgetReservation(userId, reservation);
+      await service.from("jobs").update({ run_state: "CANCELLED", error_code: "INTERNAL_ERROR" }).eq("id", result.job_id);
+      throw new AppError("INTERNAL_ERROR", "could not attach the usage reservation");
+    }
+  }
 
   if (result.job_id) await dispatchJobById(result.job_id).catch(() => undefined);
 
