@@ -1,0 +1,53 @@
+# Specification / working notes (kept local, not committed)
+Claude.MD
+CLAUDE.md
+CLAUDE.MD
+claude.md
+claude.MD
+Claude.md
+
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Next.js
+.next/
+out/
+build/
+dist/
+next-env.d.ts
+
+# Environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+
+# Test and tooling output
+coverage/
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+*.tsbuildinfo
+
+# Local data: dataset downloads, fixtures with private content, exports
+data/cache/
+data/mathnet-release/
+data/*.local.json
+tmp/
+exports/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.vercel
