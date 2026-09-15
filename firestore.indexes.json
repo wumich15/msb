@@ -1,0 +1,109 @@
+{
+  "indexes": [
+    { "collectionGroup": "folders", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "created_at", "order": "ASCENDING" } ] },
+
+    { "collectionGroup": "problems", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "updated_at", "order": "DESCENDING" } ] },
+    { "collectionGroup": "problems", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "folder_id", "order": "ASCENDING" }, { "fieldPath": "updated_at", "order": "DESCENDING" } ] },
+    { "collectionGroup": "problems", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "updated_at", "order": "DESCENDING" } ] },
+    { "collectionGroup": "problems", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "folder_id", "order": "ASCENDING" }, { "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "updated_at", "order": "DESCENDING" } ] },
+    { "collectionGroup": "problems", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "imported_mathnet_id", "order": "ASCENDING" } ] },
+
+    { "collectionGroup": "problem_versions", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "problem_id", "order": "ASCENDING" } ] },
+    { "collectionGroup": "study_events", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "problem_id", "order": "ASCENDING" }, { "fieldPath": "created_at", "order": "ASCENDING" } ] },
+    { "collectionGroup": "study_events", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "problem_id", "order": "ASCENDING" } ] },
+
+    { "collectionGroup": "reference_solutions", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "problem_id", "order": "ASCENDING" },
+      { "fieldPath": "statement_version", "order": "ASCENDING" }, { "fieldPath": "state", "order": "ASCENDING" },
+      { "fieldPath": "created_at", "order": "DESCENDING" } ] },
+    { "collectionGroup": "reference_solutions", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "problem_id", "order": "ASCENDING" }, { "fieldPath": "state", "order": "ASCENDING" } ] },
+    { "collectionGroup": "reference_solutions", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "problem_id", "order": "ASCENDING" } ] },
+
+    { "collectionGroup": "chat_messages", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "problem_id", "order": "ASCENDING" }, { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "created_at", "order": "DESCENDING" } ] },
+    { "collectionGroup": "chat_messages", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "problem_id", "order": "ASCENDING" }, { "fieldPath": "user_id", "order": "ASCENDING" },
+      { "fieldPath": "statement_version", "order": "ASCENDING" }, { "fieldPath": "created_at", "order": "ASCENDING" } ] },
+    { "collectionGroup": "chat_messages", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "problem_id", "order": "ASCENDING" } ] },
+
+    { "collectionGroup": "problem_idea_profiles", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "problem_id", "order": "ASCENDING" },
+      { "fieldPath": "statement_version", "order": "ASCENDING" }, { "fieldPath": "created_at", "order": "DESCENDING" } ] },
+    { "collectionGroup": "problem_idea_profiles", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "problem_id", "order": "ASCENDING" } ] },
+
+    { "collectionGroup": "jobs", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "run_state", "order": "ASCENDING" } ] },
+    { "collectionGroup": "jobs", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "problem_id", "order": "ASCENDING" }, { "fieldPath": "run_state", "order": "ASCENDING" } ] },
+    { "collectionGroup": "jobs", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "problem_id", "order": "ASCENDING" }, { "fieldPath": "job_type", "order": "ASCENDING" }, { "fieldPath": "run_state", "order": "ASCENDING" } ] },
+    { "collectionGroup": "jobs", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "problem_id", "order": "ASCENDING" }, { "fieldPath": "user_id", "order": "ASCENDING" },
+      { "fieldPath": "run_state", "order": "ASCENDING" }, { "fieldPath": "created_at", "order": "DESCENDING" } ] },
+    { "collectionGroup": "jobs", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "run_state", "order": "ASCENDING" }, { "fieldPath": "dispatch_state", "order": "ASCENDING" }, { "fieldPath": "created_at", "order": "ASCENDING" } ] },
+    { "collectionGroup": "jobs", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "run_state", "order": "ASCENDING" }, { "fieldPath": "expires_at", "order": "ASCENDING" } ] },
+    { "collectionGroup": "jobs", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "usage_reconciled", "order": "ASCENDING" }, { "fieldPath": "run_state", "order": "ASCENDING" }, { "fieldPath": "reserved_tokens", "order": "ASCENDING" } ] },
+
+    { "collectionGroup": "exports", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "created_at", "order": "DESCENDING" } ] },
+    { "collectionGroup": "exports", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "state", "order": "ASCENDING" }, { "fieldPath": "expires_at", "order": "ASCENDING" } ] },
+
+    { "collectionGroup": "mathnet_problems", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "release_id", "order": "ASCENDING" }, { "fieldPath": "is_eligible", "order": "ASCENDING" } ] },
+    { "collectionGroup": "mathnet_problems", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "release_id", "order": "ASCENDING" }, { "fieldPath": "content_hash", "order": "ASCENDING" } ] },
+
+    { "collectionGroup": "mathnet_solution_data", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "release_id", "order": "ASCENDING" }, { "fieldPath": "is_eligible", "order": "ASCENDING" },
+      { "fieldPath": "search_terms", "arrayConfig": "CONTAINS" } ] },
+    { "collectionGroup": "mathnet_solution_data", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "release_id", "order": "ASCENDING" }, { "fieldPath": "is_eligible", "order": "ASCENDING" },
+      { "fieldPath": "idea_ids", "arrayConfig": "CONTAINS" } ] },
+    { "collectionGroup": "mathnet_solution_data", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "release_id", "order": "ASCENDING" }, { "fieldPath": "is_eligible", "order": "ASCENDING" },
+      { "fieldPath": "statement_embedding", "vectorConfig": { "dimension": 1024, "flat": {} } } ] },
+    { "collectionGroup": "mathnet_solution_data", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "release_id", "order": "ASCENDING" }, { "fieldPath": "is_eligible", "order": "ASCENDING" },
+      { "fieldPath": "idea_embedding", "vectorConfig": { "dimension": 1024, "flat": {} } } ] },
+
+    { "collectionGroup": "recommendation_runs", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "cache_key", "order": "ASCENDING" }, { "fieldPath": "state", "order": "ASCENDING" }, { "fieldPath": "created_at", "order": "DESCENDING" } ] },
+    { "collectionGroup": "recommendation_runs", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "problem_id", "order": "ASCENDING" } ] },
+    { "collectionGroup": "recommendation_items", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "run_id", "order": "ASCENDING" }, { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "rank", "order": "ASCENDING" } ] },
+    { "collectionGroup": "recommendation_items", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "user_id", "order": "ASCENDING" }, { "fieldPath": "excluded", "order": "ASCENDING" } ] }
+  ],
+  "fieldOverrides": [
+    { "collectionGroup": "mathnet_solution_data", "fieldPath": "statement_embedding", "indexes": [] },
+    { "collectionGroup": "mathnet_solution_data", "fieldPath": "idea_embedding", "indexes": [] },
+    { "collectionGroup": "mse_lookup_cache", "fieldPath": "response", "indexes": [] },
+    { "collectionGroup": "reference_solutions", "fieldPath": "artifact", "indexes": [] },
+    { "collectionGroup": "reference_solutions", "fieldPath": "submitted_text", "indexes": [] },
+    { "collectionGroup": "chat_messages", "fieldPath": "notes_snapshot", "indexes": [] },
+    { "collectionGroup": "chat_messages", "fieldPath": "content", "indexes": [] },
+    { "collectionGroup": "notes", "fieldPath": "markdown", "indexes": [] },
+    { "collectionGroup": "study_events", "fieldPath": "notes_snapshot", "indexes": [] },
+    { "collectionGroup": "problem_versions", "fieldPath": "statement_markdown", "indexes": [] },
+    { "collectionGroup": "mathnet_problems", "fieldPath": "statement_markdown", "indexes": [] },
+    { "collectionGroup": "mathnet_solution_data", "fieldPath": "solutions_markdown", "indexes": [] }
+  ]
+}

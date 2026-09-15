@@ -1,7 +1,7 @@
 import "server-only";
 import { z } from "zod";
 import { aiConfig, limits } from "@/lib/config";
-import { callModelForJson, untrustedBlock } from "@/lib/ai/anthropic";
+import { callModelForJson, untrustedBlock } from "@/lib/ai/openai";
 import { tutorResponseSchema, type TutorResponseSchema } from "@/lib/ai/schemas";
 import { reviewerPrompt, tutorPrompt } from "@/prompts";
 import { plainTextExcerpt } from "@/lib/markdown";

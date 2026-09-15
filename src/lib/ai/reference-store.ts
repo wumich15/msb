@@ -1,7 +1,10 @@
 import "server-only";
-import { createServiceClient } from "@/lib/db/service";
+import { nowIso } from "@/lib/db/admin";
+import { COLLECTIONS, col, newId } from "@/lib/db/collections";
 import { AppError } from "@/lib/errors";
+import { readMany, readOne } from "@/lib/db/transactions/shared";
 import type {
+  AssistantSessionRow,
   CheckResult,
   ReferenceArtifact,
   ReferenceProvenance,
@@ -11,47 +14,32 @@ import type {
 } from "@/lib/db/types";
 
 /**
- * The only module that reads or writes `reference_solutions`.
+ * The only module (besides the transactions that select and supersede them) that
+ * reads or writes `reference_solutions`.
  *
  * Nothing here returns a worked solution except `revealReference`, which is
  * reached solely through the explicit spoiler route after the readiness gate.
  */
-
-export async function reusableReferenceExists(
-  userId: string,
-  problemId: string,
-  statementVersion: number,
-): Promise<boolean> {
-  const supabase = createServiceClient();
-  const { data } = await supabase
-    .from("reference_solutions")
-    .select("id")
-    .eq("user_id", userId)
-    .eq("problem_id", problemId)
-    .eq("statement_version", statementVersion)
-    .eq("state", "READY")
-    .limit(1);
-  return (data?.length ?? 0) > 0;
-}
 
 export async function findReusableReference(
   userId: string,
   problemId: string,
   statementVersion: number,
 ): Promise<ReferenceSolutionPrivateRow | null> {
-  const supabase = createServiceClient();
-  const { data } = await supabase
-    .from("reference_solutions")
-    .select("*")
-    .eq("user_id", userId)
-    .eq("problem_id", problemId)
-    .eq("statement_version", statementVersion)
-    .eq("state", "READY")
-    .is("reported_at", null)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  return (data as ReferenceSolutionPrivateRow | null) ?? null;
+  const rows = await readMany<ReferenceSolutionPrivateRow>(
+    col(COLLECTIONS.referenceSolutions)
+      .where("user_id", "==", userId)
+      .where("problem_id", "==", problemId)
+      .where("statement_version", "==", statementVersion)
+      .where("state", "==", "READY")
+      .orderBy("created_at", "desc")
+      .limit(5),
+  );
+  return rows.find((row) => !row.reported_at) ?? null;
+}
+
+export async function reusableReferenceExists(userId: string, problemId: string, statementVersion: number): Promise<boolean> {
+  return (await findReusableReference(userId, problemId, statementVersion)) !== null;
 }
 
 export interface CreateReferenceInput {
@@ -62,6 +50,7 @@ export interface CreateReferenceInput {
   preparationGeneration: number;
   provenance: ReferenceProvenance;
   artifact?: ReferenceArtifact | null;
+  checkResult?: CheckResult | null;
   sourceUrls?: SourceCredit[];
   attribution?: Record<string, unknown>;
   modelVersions?: Record<string, string>;
@@ -69,27 +58,31 @@ export interface CreateReferenceInput {
 }
 
 export async function createReference(input: CreateReferenceInput): Promise<ReferenceSolutionPrivateRow> {
-  const supabase = createServiceClient();
-  const { data, error } = await supabase
-    .from("reference_solutions")
-    .insert({
-      user_id: input.userId,
-      problem_id: input.problemId,
-      statement_version: input.statementVersion,
-      activation_generation: input.activationGeneration,
-      preparation_generation: input.preparationGeneration,
-      state: "PENDING",
-      provenance: input.provenance,
-      artifact: input.artifact ?? null,
-      source_urls: input.sourceUrls ?? [],
-      attribution: input.attribution ?? {},
-      model_versions: input.modelVersions ?? {},
-      prompt_versions: input.promptVersions ?? {},
-    })
-    .select("*")
-    .single();
-  if (error) throw new AppError("INTERNAL_ERROR", error.message);
-  return data as ReferenceSolutionPrivateRow;
+  const now = nowIso();
+  const row: ReferenceSolutionPrivateRow = {
+    id: newId(),
+    user_id: input.userId,
+    problem_id: input.problemId,
+    statement_version: input.statementVersion,
+    revision: 1,
+    activation_generation: input.activationGeneration,
+    preparation_generation: input.preparationGeneration,
+    state: "PENDING",
+    provenance: input.provenance,
+    submitted_text: null,
+    artifact: input.artifact ?? null,
+    check_result: input.checkResult ?? null,
+    source_urls: input.sourceUrls ?? [],
+    attribution: input.attribution ?? {},
+    model_versions: input.modelVersions ?? {},
+    prompt_versions: input.promptVersions ?? {},
+    reported_at: null,
+    report_reason: null,
+    created_at: now,
+    updated_at: now,
+  };
+  await col(COLLECTIONS.referenceSolutions).doc(row.id).set(row);
+  return row;
 }
 
 export async function updateReference(
@@ -98,53 +91,48 @@ export async function updateReference(
     state?: ReferenceState;
     artifact?: ReferenceArtifact | null;
     checkResult?: CheckResult | null;
-    revisionIncrement?: boolean;
+    provenance?: ReferenceProvenance;
+    attribution?: Record<string, unknown>;
     sourceUrls?: SourceCredit[];
     modelVersions?: Record<string, string>;
+    promptVersions?: Record<string, string>;
   },
 ): Promise<ReferenceSolutionPrivateRow> {
-  const supabase = createServiceClient();
-  const update: Record<string, unknown> = {};
+  const ref = col(COLLECTIONS.referenceSolutions).doc(referenceId);
+  const update: Partial<ReferenceSolutionPrivateRow> = { updated_at: nowIso() };
   if (patch.state) update.state = patch.state;
   if (patch.artifact !== undefined) update.artifact = patch.artifact;
   if (patch.checkResult !== undefined) update.check_result = patch.checkResult;
+  if (patch.provenance) update.provenance = patch.provenance;
+  if (patch.attribution) update.attribution = patch.attribution;
   if (patch.sourceUrls) update.source_urls = patch.sourceUrls;
   if (patch.modelVersions) update.model_versions = patch.modelVersions;
-
-  if (patch.revisionIncrement) {
-    const { data: current } = await supabase
-      .from("reference_solutions")
-      .select("revision")
-      .eq("id", referenceId)
-      .single();
-    update.revision = ((current?.revision as number | undefined) ?? 1) + 1;
-  }
-
-  const { data, error } = await supabase
-    .from("reference_solutions")
-    .update(update)
-    .eq("id", referenceId)
-    .select("*")
-    .single();
-  if (error) throw new AppError("INTERNAL_ERROR", error.message);
-  return data as ReferenceSolutionPrivateRow;
+  if (patch.promptVersions) update.prompt_versions = patch.promptVersions;
+  await ref.update(update);
+  const stored = await readOne<ReferenceSolutionPrivateRow>(ref);
+  if (!stored) throw new AppError("NOT_FOUND");
+  return stored;
 }
 
 /** Loads the reference a worker is allowed to use, after the gate has passed. */
-export async function loadReferenceForWorker(
-  referenceId: string,
-  userId: string,
-): Promise<ReferenceSolutionPrivateRow> {
-  const supabase = createServiceClient();
-  const { data, error } = await supabase
-    .from("reference_solutions")
-    .select("*")
-    .eq("id", referenceId)
-    .eq("user_id", userId)
-    .maybeSingle();
-  if (error) throw new AppError("INTERNAL_ERROR", error.message);
-  if (!data) throw new AppError("NOT_FOUND");
-  return data as ReferenceSolutionPrivateRow;
+export async function loadReferenceForWorker(referenceId: string, userId: string): Promise<ReferenceSolutionPrivateRow> {
+  const row = await readOne<ReferenceSolutionPrivateRow>(col(COLLECTIONS.referenceSolutions).doc(referenceId));
+  if (!row || row.user_id !== userId) throw new AppError("NOT_FOUND");
+  return row;
+}
+
+/** Latest READY reference for a statement version, for classification evidence. */
+export async function latestReadyReference(userId: string, problemId: string, statementVersion: number): Promise<ReferenceSolutionPrivateRow | null> {
+  const rows = await readMany<ReferenceSolutionPrivateRow>(
+    col(COLLECTIONS.referenceSolutions)
+      .where("user_id", "==", userId)
+      .where("problem_id", "==", problemId)
+      .where("statement_version", "==", statementVersion)
+      .where("state", "==", "READY")
+      .orderBy("created_at", "desc")
+      .limit(1),
+  );
+  return rows[0] ?? null;
 }
 
 export interface RevealedReference {
@@ -161,18 +149,11 @@ export interface RevealedReference {
  * this re-reads the selected reference rather than trusting an id from the client.
  */
 export async function revealReference(userId: string, problemId: string): Promise<RevealedReference> {
-  const supabase = createServiceClient();
-  const { data: session } = await supabase
-    .from("assistant_sessions")
-    .select("selected_reference_id")
-    .eq("problem_id", problemId)
-    .eq("user_id", userId)
-    .maybeSingle();
+  const session = await readOne<AssistantSessionRow>(col(COLLECTIONS.assistantSessions).doc(problemId));
+  if (!session || session.user_id !== userId) throw new AppError("NOT_FOUND");
+  if (!session.selected_reference_id) throw new AppError("SOLUTION_NOT_READY", "no_reference");
 
-  const referenceId = session?.selected_reference_id as string | undefined;
-  if (!referenceId) throw new AppError("SOLUTION_NOT_READY", "no_reference");
-
-  const reference = await loadReferenceForWorker(referenceId, userId);
+  const reference = await loadReferenceForWorker(session.selected_reference_id, userId);
   if (reference.state !== "READY" || !reference.artifact || !reference.check_result?.passed) {
     throw new AppError("SOLUTION_NOT_READY", "check_not_passed");
   }

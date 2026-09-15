@@ -1,10 +1,10 @@
 import { requireSession } from "@/lib/auth/session";
 import { requireOwnedProblem } from "@/lib/auth/ownership";
-import { assertRpcOk, assertSameOrigin, ok, parseBody, route } from "@/lib/http";
+import { assertSameOrigin, ok, parseBody, route } from "@/lib/http";
 import { assistantToggleSchema } from "@/lib/validation";
 import { reusableReferenceExists } from "@/lib/ai/reference-store";
+import { setAssistantEnabled } from "@/lib/db/transactions/assistant";
 import { PREPARATION_LABELS } from "@/lib/db/projections";
-import type { PreparationState } from "@/lib/db/types";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -15,24 +15,12 @@ type Params = { params: Promise<{ id: string }> };
  */
 export const POST = route(async (request: Request, { params }: Params) => {
   await assertSameOrigin();
-  const { supabase, userId } = await requireSession();
+  const { userId } = await requireSession();
   const { id } = await params;
-  const problem = await requireOwnedProblem(supabase, id, userId);
+  const problem = await requireOwnedProblem(id, userId);
   const body = await parseBody(request, assistantToggleSchema);
 
-  const { data, error } = await supabase.rpc("set_assistant_enabled", {
-    p_problem_id: id,
-    p_enabled: body.enabled,
-  });
-  assertRpcOk(error);
-
-  const result = data as {
-    enabled: boolean;
-    activation_generation: number;
-    preparation_generation: number;
-    preparation_state: PreparationState;
-    statement_version: number;
-  };
+  const result = await setAssistantEnabled(userId, id, body.enabled);
 
   return ok({
     enabled: result.enabled,

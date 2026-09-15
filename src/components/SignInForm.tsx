@@ -2,13 +2,15 @@
 
 import { useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { getBrowserClient } from "@/lib/db/browser";
+import { sendSignInLinkToEmail } from "firebase/auth";
+import { getFirebaseAuth, SIGN_IN_EMAIL_KEY } from "@/lib/firebase/client";
 import { publicConfig } from "@/lib/config";
 import { clearAllRecoveryDrafts } from "@/lib/drafts";
 
 const ERROR_MESSAGES: Record<string, string> = {
   link_expired: "That sign-in link has expired or was already used. Request a new one below.",
   missing_code: "That link was incomplete. Request a new one below.",
+  session_failed: "The sign-in could not be completed. Request a new link below.",
 };
 
 export default function SignInForm() {
@@ -27,10 +29,14 @@ export default function SignInForm() {
     setState("sending");
     setMessage(null);
     try {
-      const supabase = getBrowserClient();
-      const redirectTo = `${publicConfig.appOrigin}/auth/callback?next=${encodeURIComponent(next)}`;
-      const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: redirectTo } });
-      if (error) throw error;
+      const auth = getFirebaseAuth();
+      const url = `${publicConfig.appOrigin}/auth/callback?next=${encodeURIComponent(next)}`;
+      await sendSignInLinkToEmail(auth, email, { url, handleCodeInApp: true });
+      try {
+        window.localStorage.setItem(SIGN_IN_EMAIL_KEY, email);
+      } catch {
+        // Blocked storage: the callback page asks for the address again.
+      }
       setState("sent");
     } catch (error) {
       setState("failed");

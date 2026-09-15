@@ -1,10 +1,10 @@
 import { requireSession } from "@/lib/auth/session";
-import { requireOwnedProblem } from "@/lib/auth/ownership";
-import { assertRpcOk, assertSameOrigin, ok, parseBody, route } from "@/lib/http";
+import { assertSameOrigin, ok, parseBody, route } from "@/lib/http";
 import { statusSchema } from "@/lib/validation";
 import { dispatchJobById } from "@/jobs/dispatch";
 import { reserveExistingJobBudget, TOKEN_ESTIMATES } from "@/lib/ai/usage";
-import { createServiceClient } from "@/lib/db/service";
+import { changeStatus } from "@/lib/db/transactions/core";
+import { cancelJob } from "@/lib/db/transactions/jobs";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -15,40 +15,32 @@ type Params = { params: Promise<{ id: string }> };
  */
 export const PATCH = route(async (request: Request, { params }: Params) => {
   await assertSameOrigin();
-  const { supabase, userId } = await requireSession();
+  const { userId } = await requireSession();
   const { id } = await params;
-  await requireOwnedProblem(supabase, id, userId);
-
   const body = await parseBody(request, statusSchema);
 
-  const { data, error } = await supabase.rpc("change_status", {
-    p_problem_id: id,
-    p_to_status: body.status,
-    p_expected_statement_version: body.expectedStatementVersion ?? null,
-    p_expected_notes_revision: body.expectedNotesRevision ?? null,
-  });
-  assertRpcOk(error);
+  const result = await changeStatus(
+    userId,
+    id,
+    body.status,
+    body.expectedStatementVersion ?? null,
+    body.expectedNotesRevision ?? null,
+  );
 
-  const result = data as {
-    changed: boolean;
-    status: string;
-    classification_job_id?: string | null;
-    recommendation_job_id?: string | null;
-  };
-
-  const service = createServiceClient();
   let classificationScheduled = !result.classification_job_id;
   if (result.classification_job_id) {
     const reserved = await reserveExistingJobBudget(result.classification_job_id, TOKEN_ESTIMATES["classify-problem"]).catch(() => false);
     classificationScheduled = reserved;
     if (reserved) await dispatchJobById(result.classification_job_id).catch(() => undefined);
-    else await service.from("jobs").update({ run_state: "CANCELLED", error_code: "AI_LIMIT_REACHED" }).eq("id", result.classification_job_id);
+    else await cancelJob(result.classification_job_id, "AI_LIMIT_REACHED");
   }
   if (result.recommendation_job_id) {
     // Recommendation generation may fail; completing the problem already succeeded.
-    const reserved = classificationScheduled && await reserveExistingJobBudget(result.recommendation_job_id, TOKEN_ESTIMATES["recommend-problems"]).catch(() => false);
+    const reserved =
+      classificationScheduled &&
+      (await reserveExistingJobBudget(result.recommendation_job_id, TOKEN_ESTIMATES["recommend-problems"]).catch(() => false));
     if (reserved) await dispatchJobById(result.recommendation_job_id).catch(() => undefined);
-    else await service.from("jobs").update({ run_state: "CANCELLED", error_code: "AI_LIMIT_REACHED" }).eq("id", result.recommendation_job_id);
+    else await cancelJob(result.recommendation_job_id, "AI_LIMIT_REACHED");
   }
 
   return ok({

@@ -1,6 +1,9 @@
 import "server-only";
-import { createServiceClient } from "@/lib/db/service";
 import { accountStillExists } from "@/lib/auth/ownership";
+import { COLLECTIONS, col, ids } from "@/lib/db/collections";
+import { readOne } from "@/lib/db/transactions/shared";
+import { claimJob as claimJobTx, finishJob as finishJobTx, setJobStage as setJobStageTx, type FinishOptions } from "@/lib/db/transactions/jobs";
+import { setPreparationStateForJob } from "@/lib/db/transactions/assistant";
 import type {
   AssistantSessionRow,
   JobRow,
@@ -13,7 +16,7 @@ import type {
 /**
  * Shared worker plumbing.
  *
- * Workers hold a privileged database client, so every one of them re-verifies
+ * Workers hold the privileged Admin SDK, so every one of them re-verifies
  * ownership and re-reads the live state instead of trusting the event payload.
  */
 
@@ -25,75 +28,39 @@ export interface ProblemContext {
 }
 
 export async function claimJob(jobId: string): Promise<JobRow | null> {
-  const supabase = createServiceClient();
-  const { data, error } = await supabase.rpc("claim_job", { p_job_id: jobId });
-  if (error) throw new Error(error.message);
-
-  const result = data as { ok: boolean; job?: JobRow; code?: string };
-  if (!result?.ok) return null; // Already terminal, expired, or out of attempts.
+  const result = await claimJobTx(jobId);
+  if (!result.ok) return null; // Already terminal, expired, or out of attempts.
   return result.job ?? null;
 }
 
-export async function finishJob(
-  jobId: string,
-  runState: JobRunState,
-  options: {
-    errorCode?: string;
-    errorDetail?: string;
-    result?: Record<string, unknown>;
-    providerRequestIds?: string[];
-    needsBillingReconciliation?: boolean;
-  } = {},
-): Promise<void> {
-  const supabase = createServiceClient();
-  await supabase.rpc("finish_job", {
-    p_job_id: jobId,
-    p_run_state: runState,
-    p_error_code: options.errorCode ?? null,
-    p_error_detail: options.errorDetail?.slice(0, 500) ?? null,
-    p_result: options.result ?? null,
-    p_provider_request_ids: options.providerRequestIds ?? null,
-    p_needs_billing_reconciliation: options.needsBillingReconciliation ?? false,
-  });
+export async function finishJob(jobId: string, runState: JobRunState, options: FinishOptions = {}): Promise<void> {
+  await finishJobTx(jobId, runState, options);
 }
 
 export async function setJobStage(jobId: string, stage: string): Promise<void> {
-  const supabase = createServiceClient();
-  await supabase.from("jobs").update({ stage }).eq("id", jobId);
+  await setJobStageTx(jobId, stage);
 }
 
 export async function loadProblemContext(userId: string, problemId: string): Promise<ProblemContext | null> {
-  const supabase = createServiceClient();
-
   // The account may have been deleted between dispatch and execution.
-  if (!(await accountStillExists(supabase, userId))) return null;
+  if (!(await accountStillExists(userId))) return null;
 
-  const { data: problem } = await supabase
-    .from("problems")
-    .select("*")
-    .eq("id", problemId)
-    .eq("user_id", userId)
-    .maybeSingle();
-  if (!problem) return null;
-
-  const typedProblem = problem as ProblemRow;
+  const problem = await readOne<ProblemRow>(col(COLLECTIONS.problems).doc(problemId));
+  if (!problem || problem.user_id !== userId) return null;
 
   const [statement, notes, session] = await Promise.all([
-    supabase
-      .from("problem_versions")
-      .select("*")
-      .eq("problem_id", problemId)
-      .eq("version", typedProblem.current_statement_version)
-      .maybeSingle(),
-    supabase.from("notes").select("*").eq("problem_id", problemId).maybeSingle(),
-    supabase.from("assistant_sessions").select("*").eq("problem_id", problemId).maybeSingle(),
+    problem.current_statement_version > 0
+      ? readOne<ProblemVersionRow>(col(COLLECTIONS.problemVersions).doc(ids.versionDoc(problemId, problem.current_statement_version)))
+      : Promise.resolve(null),
+    readOne<NotesRow>(col(COLLECTIONS.notes).doc(problemId)),
+    readOne<AssistantSessionRow>(col(COLLECTIONS.assistantSessions).doc(problemId)),
   ]);
 
   return {
-    problem: typedProblem,
-    statement: (statement.data as ProblemVersionRow | null) ?? null,
-    notes: (notes.data as NotesRow | null) ?? null,
-    session: (session.data as AssistantSessionRow | null) ?? null,
+    problem,
+    statement,
+    notes: notes && notes.user_id === userId ? notes : null,
+    session: session && session.user_id === userId ? session : null,
   };
 }
 
@@ -115,16 +82,7 @@ export async function setPreparationState(
   state: AssistantSessionRow["preparation_state"],
   message: string | null = null,
 ): Promise<void> {
-  if (!job.problem_id) return;
-  const supabase = createServiceClient();
-  await supabase
-    .from("assistant_sessions")
-    .update({ preparation_state: state, preparation_message: message })
-    .eq("problem_id", job.problem_id)
-    .eq("user_id", job.user_id)
-    .eq("activation_generation", job.activation_generation)
-    .eq("preparation_generation", job.preparation_generation)
-    .eq("statement_version", job.statement_version);
+  await setPreparationStateForJob(job, state, message);
 }
 
 /** A wall-clock budget the preparation run shares across all of its steps. */

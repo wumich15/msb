@@ -1,8 +1,8 @@
 import { requireSession } from "@/lib/auth/session";
-import { assertRpcOk, ok, route } from "@/lib/http";
+import { ok, route } from "@/lib/http";
 import { projectJob } from "@/lib/db/projections";
+import { readJob } from "@/lib/db/transactions/jobs";
 import { AppError } from "@/lib/errors";
-import type { JobRow } from "@/lib/db/types";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -11,21 +11,14 @@ type Params = { params: Promise<{ id: string }> };
  * code — never a worker payload, a prompt, or reference text.
  */
 export const GET = route(async (_request: Request, { params }: Params) => {
-  const { supabase, userId } = await requireSession();
+  const { userId } = await requireSession();
   const { id } = await params;
 
-  const { data, error } = await supabase
-    .from("jobs")
-    .select("*")
-    .eq("id", id)
-    .eq("user_id", userId)
-    .maybeSingle();
-  assertRpcOk(error);
-  if (!data) throw new AppError("NOT_FOUND");
+  const job = await readJob(id);
+  if (!job || job.user_id !== userId) throw new AppError("NOT_FOUND");
 
-  const job = projectJob(data as JobRow);
   // Poll every two seconds while visible, then back off, then stop. Raw worker
-  // results are deliberately excluded because they can contain private IDs or
+  // results are deliberately excluded because they can contain private ids or
   // provider metadata the browser does not need.
-  return ok({ job });
+  return ok({ job: projectJob(job) });
 });

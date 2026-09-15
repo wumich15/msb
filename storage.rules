@@ -1,0 +1,13 @@
+rules_version = '2';
+
+// Export archives live under exports/<user_id>/<export_id>.zip and are written
+// only by the worker (Admin SDK). Downloads go through a short-lived signed URL
+// or the session-authorized /api/exports/:id/download route, never a client SDK
+// read, so no client access is granted here.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

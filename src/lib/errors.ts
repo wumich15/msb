@@ -59,17 +59,23 @@ export function isErrorCode(value: unknown): value is ErrorCode {
   return typeof value === "string" && (ERROR_CODES as readonly string[]).includes(value);
 }
 
-/**
- * Database functions raise an exception whose message is the error code, so a
- * conflict surfaces here without parsing prose.
- */
-export function fromPostgresError(error: { message?: string; details?: string | null } | null): AppError {
-  const message = error?.message ?? "";
-  const code = ERROR_CODES.find((c) => message.includes(c));
-  if (code) return new AppError(code, error?.details ?? undefined);
-  return new AppError("INTERNAL_ERROR", message.slice(0, 200));
-}
-
 export function statusFor(code: ErrorCode): number {
   return STATUS_BY_CODE[code];
+}
+
+/**
+ * A Firestore transaction that throws an AppError aborts and rethrows it; a
+ * contention/abort error surfaces as a retriable conflict rather than a crash.
+ */
+export function fromFirestoreError(error: unknown): AppError {
+  if (error instanceof AppError) return error;
+  const code = (error as { code?: number | string } | null)?.code;
+  if (code === 10 || code === "aborted" || code === "ABORTED") {
+    return new AppError("STALE_REQUEST", "the record changed while this request ran; retry");
+  }
+  if (code === 8 || code === "resource-exhausted" || code === 14 || code === "unavailable") {
+    return new AppError("UPSTREAM_UNAVAILABLE", "the database is temporarily unavailable");
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return new AppError("INTERNAL_ERROR", message.slice(0, 200));
 }

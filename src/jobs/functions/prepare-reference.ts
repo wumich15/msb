@@ -1,8 +1,9 @@
 import { inngest, EVENT_NAME, type JobEventData } from "@/jobs/client";
 import { claimJob, finishJob, isSuperseded, loadProblemContext, RunBudget, setJobStage, setPreparationState } from "@/jobs/runtime";
 import { prepareReference } from "@/lib/ai/preparation";
-import { createReference, updateReference } from "@/lib/ai/reference-store";
-import { createServiceClient } from "@/lib/db/service";
+import { createReference, loadReferenceForWorker, updateReference } from "@/lib/ai/reference-store";
+import { selectReference, setPreparationMessageForJob } from "@/lib/db/transactions/assistant";
+import { cancelJob, enqueueJob } from "@/lib/db/transactions/jobs";
 import { reconcileJobUsage, reserveExistingJobBudget, TOKEN_ESTIMATES } from "@/lib/ai/usage";
 import { limits } from "@/lib/config";
 import type { ReferenceSolutionPrivateRow } from "@/lib/db/types";
@@ -28,7 +29,7 @@ export const prepareReferenceFunction = inngest.createFunction(
     const job = await step.run("claim", () => claimJob(jobId));
     if (!job || !problemId) return { skipped: true };
 
-    const context = await step.run("load-context", () => loadProblemContext(userId, problemId));
+    const context = await loadProblemContext(userId, problemId);
     if (!context || !context.session) {
       await finishJob(jobId, "CANCELLED", { errorCode: "NOT_FOUND" });
       return { skipped: true };
@@ -42,19 +43,12 @@ export const prepareReferenceFunction = inngest.createFunction(
     }
 
     const choice = (job.input.choice as "provide" | "find") ?? "find";
-    const supabase = createServiceClient();
 
     // A pasted submission was stored with the choice, so this payload holds an id.
     let reference: ReferenceSolutionPrivateRow | null = null;
     const existingReferenceId = job.input.reference_id as string | undefined;
     if (existingReferenceId) {
-      const { data } = await supabase
-        .from("reference_solutions")
-        .select("*")
-        .eq("id", existingReferenceId)
-        .eq("user_id", userId)
-        .maybeSingle();
-      reference = (data as ReferenceSolutionPrivateRow | null) ?? null;
+      reference = await loadReferenceForWorker(existingReferenceId, userId).catch(() => null);
     }
 
     await setJobStage(jobId, choice === "provide" ? "validating" : "searching");
@@ -70,7 +64,7 @@ export const prepareReferenceFunction = inngest.createFunction(
         budget,
       });
     } catch (error) {
-      await reconcileJobUsage(jobId, userId, job.reserved_tokens ?? 0, 0);
+      await reconcileJobUsage(jobId, 0);
       await setPreparationState(job, "BLOCKED", "Could not prepare a solution. You can retry.");
       await finishJob(jobId, "FAILED", {
         errorCode: "UPSTREAM_UNAVAILABLE",
@@ -80,12 +74,7 @@ export const prepareReferenceFunction = inngest.createFunction(
       return { failed: true };
     }
 
-    await reconcileJobUsage(
-      jobId,
-      userId,
-      job.reserved_tokens ?? 0,
-      outcome.usage.inputTokens + outcome.usage.outputTokens,
-    );
+    await reconcileJobUsage(jobId, outcome.usage.inputTokens + outcome.usage.outputTokens);
 
     // Re-read before writing: the decision may have been replaced while we worked.
     const fresh = await loadProblemContext(userId, problemId);
@@ -116,8 +105,11 @@ export const prepareReferenceFunction = inngest.createFunction(
       ? await updateReference(reference.id, {
           artifact: outcome.candidate.artifact,
           checkResult: outcome.check,
+          provenance: outcome.candidate.provenance,
+          attribution: outcome.candidate.attribution,
           sourceUrls: outcome.candidate.sources,
           modelVersions: outcome.modelVersions,
+          promptVersions: outcome.promptVersions,
         })
       : await createReference({
           userId,
@@ -127,36 +119,19 @@ export const prepareReferenceFunction = inngest.createFunction(
           preparationGeneration: job.preparation_generation ?? 0,
           provenance: outcome.candidate.provenance,
           artifact: outcome.candidate.artifact,
+          checkResult: outcome.check,
           sourceUrls: outcome.candidate.sources,
           attribution: outcome.candidate.attribution,
           modelVersions: outcome.modelVersions,
           promptVersions: outcome.promptVersions,
         });
 
-    if (reference) {
-      await supabase
-        .from("reference_solutions")
-        .update({
-          check_result: outcome.check,
-          provenance: outcome.candidate.provenance,
-          attribution: outcome.candidate.attribution,
-          prompt_versions: outcome.promptVersions,
-        })
-        .eq("id", stored.id);
-    }
-
     // Selection is conditional on the generations still matching; a late worker
     // cannot restore READY after a newer decision replaced it.
-    const { data: selection } = await supabase.rpc("select_reference", {
-      p_reference_id: stored.id,
-      p_activation_generation: job.activation_generation ?? 0,
-      p_preparation_generation: job.preparation_generation ?? 0,
-    });
-
-    const selectionResult = selection as { ok: boolean; code?: string };
-    if (!selectionResult?.ok) {
+    const selection = await selectReference(stored.id, job.activation_generation ?? 0, job.preparation_generation ?? 0);
+    if (!selection.ok) {
       await finishJob(jobId, "CANCELLED", {
-        errorCode: selectionResult?.code ?? "STALE_REQUEST",
+        errorCode: selection.code ?? "STALE_REQUEST",
         providerRequestIds: outcome.usage.requestIds,
       });
       return { superseded: true };
@@ -164,36 +139,26 @@ export const prepareReferenceFunction = inngest.createFunction(
 
     if (outcome.message) {
       // Operational note only: which path produced the reference, not its content.
-      await supabase
-        .from("assistant_sessions")
-        .update({ preparation_message: outcome.message })
-        .eq("problem_id", problemId)
-        .eq("user_id", userId)
-        .eq("activation_generation", job.activation_generation)
-        .eq("preparation_generation", job.preparation_generation)
-        .eq("statement_version", job.statement_version);
+      await setPreparationMessageForJob(job, outcome.message);
     }
 
     // A checked reference materially improves method classification. Enqueue it
     // only after the guarded reference selection has succeeded.
-    const { data: classificationJobId } = await supabase.rpc("enqueue_job", {
-      p_user_id: userId,
-      p_job_type: "classify-problem",
-      p_problem_id: problemId,
-      p_input: { reason: "reference_ready", reference_id: stored.id },
-      p_idempotency_key: `classify:reference:${stored.id}`,
-      p_activation_generation: job.activation_generation,
-      p_preparation_generation: job.preparation_generation,
-      p_statement_version: job.statement_version,
-      p_notes_revision: fresh.notes?.revision ?? null,
+    const classificationId = await enqueueJob({
+      userId,
+      jobType: "classify-problem",
+      problemId,
+      input: { reason: "reference_ready", reference_id: stored.id },
+      idempotencyKey: `classify:reference:${stored.id}`,
+      activationGeneration: job.activation_generation,
+      preparationGeneration: job.preparation_generation,
+      statementVersion: job.statement_version,
+      notesRevision: fresh.notes?.revision ?? null,
     });
-    if (classificationJobId) {
-      const classificationId = classificationJobId as string;
-      if (await reserveExistingJobBudget(classificationId, TOKEN_ESTIMATES["classify-problem"]).catch(() => false)) {
-        await dispatchJobById(classificationId);
-      } else {
-        await supabase.from("jobs").update({ run_state: "CANCELLED", error_code: "AI_LIMIT_REACHED" }).eq("id", classificationId);
-      }
+    if (await reserveExistingJobBudget(classificationId, TOKEN_ESTIMATES["classify-problem"]).catch(() => false)) {
+      await dispatchJobById(classificationId);
+    } else {
+      await cancelJob(classificationId, "AI_LIMIT_REACHED");
     }
 
     await finishJob(jobId, "SUCCEEDED", {

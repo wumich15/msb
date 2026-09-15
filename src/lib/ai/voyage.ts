@@ -81,8 +81,3 @@ export async function embed(
     totalTokens: payload.usage?.total_tokens ?? 0,
   };
 }
-
-/** Formats a pgvector literal for a Postgres function argument. */
-export function toVectorLiteral(vector: number[]): string {
-  return `[${vector.map((value) => (Number.isFinite(value) ? value : 0)).join(",")}]`;
-}

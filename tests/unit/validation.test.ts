@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { exportSchema, messageSchema, referenceChoiceSchema } from "@/lib/validation";
-import { AppError, fromPostgresError, statusFor } from "@/lib/errors";
+import { AppError, fromFirestoreError, statusFor } from "@/lib/errors";
 
 describe("request validation and errors", () => {
   it("requires a scope id for problem and folder exports", () => {
@@ -19,11 +19,17 @@ describe("request validation and errors", () => {
     expect(parsed.responseMode).toBe("default");
   });
 
-  it("maps database conflict codes without leaking arbitrary details", () => {
-    const error = fromPostgresError({ message: "NOTES_CONFLICT", details: "7" });
-    expect(error).toBeInstanceOf(AppError);
-    expect(error.code).toBe("NOTES_CONFLICT");
-    expect(error.status).toBe(409);
+  it("passes application errors through and maps database contention to a retriable conflict", () => {
+    const conflict = fromFirestoreError(new AppError("NOTES_CONFLICT", "7"));
+    expect(conflict.code).toBe("NOTES_CONFLICT");
+    expect(conflict.detail).toBe("7");
+    expect(conflict.status).toBe(409);
+
+    const aborted = fromFirestoreError(Object.assign(new Error("10 ABORTED: contention"), { code: 10 }));
+    expect(aborted.code).toBe("STALE_REQUEST");
+
+    const unknown = fromFirestoreError(new Error("secret internal detail"));
+    expect(unknown.code).toBe("INTERNAL_ERROR");
     expect(statusFor("AI_LIMIT_REACHED")).toBe(429);
   });
 });

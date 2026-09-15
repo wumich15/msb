@@ -1,8 +1,10 @@
 import { requireSession } from "@/lib/auth/session";
 import { requireOwnedProblem } from "@/lib/auth/ownership";
 import { assertSameOrigin, ok, route } from "@/lib/http";
-import { createServiceClient } from "@/lib/db/service";
 import { revealReference } from "@/lib/ai/reference-store";
+import { tutorGate } from "@/lib/db/transactions/assistant";
+import { appendEventInTx } from "@/lib/db/transactions/core";
+import { runTransaction } from "@/lib/db/transactions/shared";
 import { AppError } from "@/lib/errors";
 
 type Params = { params: Promise<{ id: string }> };
@@ -13,30 +15,29 @@ type Params = { params: Promise<{ id: string }> };
  */
 export const POST = route(async (_request: Request, { params }: Params) => {
   await assertSameOrigin();
-  const { supabase, userId } = await requireSession();
+  const { userId } = await requireSession();
   const { id } = await params;
-  await requireOwnedProblem(supabase, id, userId);
+  const problem = await requireOwnedProblem(id, userId);
 
-  const service = createServiceClient();
-  const { data: gate } = await service.rpc("tutor_gate", { p_problem_id: id, p_user_id: userId });
-  const verdict = gate as { ok: boolean; code?: string; reason?: string };
-  if (!verdict?.ok) {
-    throw new AppError(verdict?.code === "STALE_REQUEST" ? "STALE_REQUEST" : "SOLUTION_NOT_READY", verdict?.reason);
+  const verdict = await tutorGate(id, userId);
+  if (!verdict.ok) {
+    throw new AppError(verdict.code === "STALE_REQUEST" ? "STALE_REQUEST" : "SOLUTION_NOT_READY", verdict.reason);
   }
 
   const revealed = await revealReference(userId, id);
-  const { data: problem } = await service
-    .from("problems")
-    .select("current_statement_version")
-    .eq("id", id)
-    .eq("user_id", userId)
-    .single();
-  await service.from("study_events").insert({
-    user_id: userId,
-    problem_id: id,
-    kind: "reference_revealed",
-    statement_version: problem?.current_statement_version ?? null,
-    detail: { explicit_spoiler_action: true },
+  // The reveal is a study event so exports can apply the same spoiler decision.
+  await runTransaction(async (tx) => {
+    appendEventInTx(tx, {
+      user_id: userId,
+      problem_id: id,
+      kind: "reference_revealed",
+      from_status: null,
+      to_status: null,
+      statement_version: problem.current_statement_version,
+      notes_revision: null,
+      notes_snapshot: null,
+      detail: { explicit_spoiler_action: true },
+    });
   });
   return ok({ reference: revealed });
 });

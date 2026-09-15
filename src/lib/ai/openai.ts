@@ -1,26 +1,28 @@
 import "server-only";
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { z } from "zod";
 import { aiConfig, limits } from "@/lib/config";
 import { AppError } from "@/lib/errors";
 
 /**
- * Small adapter over the Anthropic Messages API.
+ * Small adapter over the OpenAI Chat Completions API.
  *
  * It does one thing: send a prompt, get JSON back, validate it. There is no agent
  * framework here, no tool use, and no place for retrieved text to become an
  * instruction — untrusted mathematical content always travels inside a content
- * block that the system prompt has already labelled as data.
+ * block that the system prompt has already labelled as data. JSON mode
+ * (`response_format: json_object`) keeps the reply parseable; every prompt in
+ * src/prompts already asks for a single JSON object.
  */
 
-let client: Anthropic | null = null;
+let client: OpenAI | null = null;
 
-function getClient(): Anthropic {
+function getClient(): OpenAI {
   const config = aiConfig();
-  if (!config.anthropicApiKey) {
+  if (!config.openaiApiKey) {
     throw new AppError("UPSTREAM_UNAVAILABLE", "The AI provider is not configured.");
   }
-  if (!client) client = new Anthropic({ apiKey: config.anthropicApiKey, maxRetries: 0 });
+  if (!client) client = new OpenAI({ apiKey: config.openaiApiKey, maxRetries: 0, timeout: limits.providerCallTimeoutMs });
   return client;
 }
 
@@ -46,10 +48,12 @@ export interface ModelCallResult<T> {
 
 const TRANSIENT_STATUSES = new Set([408, 409, 429, 500, 502, 503, 504]);
 
-/**
- * Requests a single JSON object and validates it. An assistant prefill of `{`
- * keeps the response parseable without asking the model to promise anything.
- */
+/** Reasoning models accept only the default sampling temperature. */
+function supportsTemperature(model: string): boolean {
+  return !/^(o\d|gpt-5)/i.test(model);
+}
+
+/** Requests a single JSON object and validates it against the schema. */
 export async function callModelForJson<T extends z.ZodType>(
   options: ModelCallOptions,
   schema: T,
@@ -63,26 +67,27 @@ export async function callModelForJson<T extends z.ZodType>(
       const signal = options.signal
         ? AbortSignal.any([options.signal, AbortSignal.timeout(limits.providerCallTimeoutMs)])
         : AbortSignal.timeout(limits.providerCallTimeoutMs);
-      const response = await getClient().messages.create(
+      const response = await getClient().chat.completions.create(
         {
           model: options.model,
-          max_tokens: options.maxTokens,
-          temperature: options.temperature ?? 0,
-          system: options.system,
+          max_completion_tokens: options.maxTokens,
+          ...(supportsTemperature(options.model) ? { temperature: options.temperature ?? 0 } : {}),
+          response_format: { type: "json_object" },
           messages: [
+            { role: "system", content: options.system },
             { role: "user", content: options.user },
-            { role: "assistant", content: "{" },
           ],
         },
         { signal },
       );
 
-      const text = response.content
-        .filter((block): block is Anthropic.TextBlock => block.type === "text")
-        .map((block) => block.text)
-        .join("");
+      const choice = response.choices[0];
+      const text = choice?.message?.content ?? "";
+      if (choice?.finish_reason === "length") {
+        throw new AppError("INTERNAL_ERROR", "model response was cut off before the JSON object closed");
+      }
 
-      const parsed = parseJsonObject(`{${text}`);
+      const parsed = parseJsonObject(text);
       const result = schema.safeParse(parsed);
       if (!result.success) {
         throw new AppError(
@@ -94,10 +99,10 @@ export async function callModelForJson<T extends z.ZodType>(
       return {
         value: result.data,
         usage: {
-          inputTokens: response.usage.input_tokens,
-          outputTokens: response.usage.output_tokens,
+          inputTokens: response.usage?.prompt_tokens ?? 0,
+          outputTokens: response.usage?.completion_tokens ?? 0,
         },
-        requestId: response.id ?? null,
+        requestId: response._request_id ?? response.id ?? null,
         model: options.model,
         needsBillingReconciliation: ambiguous,
       };
@@ -128,14 +133,14 @@ function parseJsonObject(text: string): unknown {
 }
 
 function isTransient(error: unknown): boolean {
-  if (error instanceof Anthropic.APIError) {
+  if (error instanceof OpenAI.APIError) {
     return error.status === undefined || TRANSIENT_STATUSES.has(error.status);
   }
-  return error instanceof Error && /timeout|ECONNRESET|fetch failed/i.test(error.message);
+  return error instanceof Error && /timeout|ECONNRESET|fetch failed|aborted/i.test(error.message);
 }
 
 function describe(error: unknown): string {
-  if (error instanceof Anthropic.APIError) return `provider error ${error.status ?? "unknown"}`;
+  if (error instanceof OpenAI.APIError) return `provider error ${error.status ?? "unknown"}`;
   return error instanceof Error ? error.message.slice(0, 200) : "provider call failed";
 }
 

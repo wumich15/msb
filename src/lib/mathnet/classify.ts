@@ -1,7 +1,7 @@
 import "server-only";
 import { createHash } from "node:crypto";
 import { aiConfig, limits, versions } from "@/lib/config";
-import { callModelForJson, untrustedBlock } from "@/lib/ai/anthropic";
+import { callModelForJson, untrustedBlock } from "@/lib/ai/openai";
 import { ideaProfileSchema, type IdeaProfileSchema } from "@/lib/ai/schemas";
 import { classifierPrompt } from "@/prompts";
 import { keepKnownIdeas, vocabularyForPrompt } from "@/lib/mathnet/taxonomy";

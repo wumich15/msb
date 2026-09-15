@@ -1,9 +1,14 @@
 import { inngest, EVENT_NAME, type JobEventData } from "@/jobs/client";
 import { claimJob, finishJob, loadProblemContext } from "@/jobs/runtime";
-import { createServiceClient } from "@/lib/db/service";
+import { COLLECTIONS, col, ids } from "@/lib/db/collections";
+import { nowIso } from "@/lib/db/admin";
+import { readOne } from "@/lib/db/transactions/shared";
+import { latestReadyReference } from "@/lib/ai/reference-store";
 import { classifyProblem, classificationInputHash, safeTagsFrom, type EvidenceKind } from "@/lib/mathnet/classify";
 import { reconcileJobUsage } from "@/lib/ai/usage";
-import type { ReferenceSolutionPrivateRow } from "@/lib/db/types";
+import { versions } from "@/lib/config";
+import { classifierPrompt } from "@/prompts";
+import type { IdeaProfilePrivateRow, ProfileRow } from "@/lib/db/types";
 
 /**
  * Builds the idea profile for one of the learner's problems.
@@ -20,7 +25,6 @@ export const classifyProblemFunction = inngest.createFunction(
     const job = await step.run("claim", () => claimJob(jobId));
     if (!job || !problemId) return { skipped: true };
 
-    const supabase = createServiceClient();
     const context = await loadProblemContext(userId, problemId);
     if (!context) {
       await finishJob(jobId, "CANCELLED", { errorCode: "NOT_FOUND" });
@@ -28,11 +32,7 @@ export const classifyProblemFunction = inngest.createFunction(
     }
 
     const manual = job.input.reason === "manual";
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("automatic_recommendations")
-      .eq("user_id", userId)
-      .maybeSingle();
+    const profile = await readOne<ProfileRow>(col(COLLECTIONS.profiles).doc(userId));
 
     // A manual request is an explicit request for AI processing; automatic runs
     // need the account preference.
@@ -43,18 +43,7 @@ export const classifyProblemFunction = inngest.createFunction(
 
     // A checked reference gives the strongest evidence; the learner's own completed
     // work is next; the statement alone is provisional.
-    const { data: referenceRow } = await supabase
-      .from("reference_solutions")
-      .select("*")
-      .eq("problem_id", problemId)
-      .eq("user_id", userId)
-      .eq("statement_version", context.problem.current_statement_version)
-      .eq("state", "READY")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    const reference = (referenceRow as ReferenceSolutionPrivateRow | null) ?? null;
+    const reference = await latestReadyReference(userId, problemId, context.problem.current_statement_version);
     const completed = context.problem.status === "complete";
     const notes = context.notes?.markdown ?? "";
 
@@ -79,12 +68,9 @@ export const classifyProblemFunction = inngest.createFunction(
 
     // Cached by input hash and classifier version.
     const inputHash = classificationInputHash(input);
-    const { data: cached } = await supabase
-      .from("problem_idea_profiles")
-      .select("id")
-      .eq("problem_id", problemId)
-      .eq("input_hash", inputHash)
-      .maybeSingle();
+    const classifierVersion = `${versions.classifier}:${classifierPrompt.version}`;
+    const cacheId = ids.ideaProfile(problemId, inputHash, classifierVersion);
+    const cached = await readOne<IdeaProfilePrivateRow>(col(COLLECTIONS.ideaProfiles).doc(cacheId));
 
     if (cached) {
       await finishJob(jobId, "SUCCEEDED", { result: { cached: true, profile_id: cached.id } });
@@ -95,7 +81,7 @@ export const classifyProblemFunction = inngest.createFunction(
     try {
       result = await classifyProblem(input);
     } catch (error) {
-      await reconcileJobUsage(jobId, userId, job.reserved_tokens ?? 0, 0);
+      await reconcileJobUsage(jobId, 0);
       await finishJob(jobId, "FAILED", {
         errorCode: "UPSTREAM_UNAVAILABLE",
         errorDetail: error instanceof Error ? error.message : "classification failed",
@@ -103,12 +89,7 @@ export const classifyProblemFunction = inngest.createFunction(
       });
       return { failed: true };
     }
-    await reconcileJobUsage(
-      jobId,
-      userId,
-      job.reserved_tokens ?? 0,
-      result.usage.inputTokens + result.usage.outputTokens,
-    );
+    await reconcileJobUsage(jobId, result.usage.inputTokens + result.usage.outputTokens);
 
     const fresh = await loadProblemContext(userId, problemId);
     if (
@@ -123,41 +104,38 @@ export const classifyProblemFunction = inngest.createFunction(
       return { superseded: true };
     }
 
-    const { data: inserted, error } = await supabase
-      .from("problem_idea_profiles")
-      .upsert(
-        {
-          user_id: userId,
-          problem_id: problemId,
-          statement_version: context.problem.current_statement_version,
-          notes_revision: context.notes?.revision ?? null,
-          idea_ids: result.profile.idea_ids,
-          secondary_idea_ids: result.profile.secondary_idea_ids,
-          mechanism: result.profile.mechanism,
-          object_roles: result.profile.object_roles,
-          prerequisites: result.profile.prerequisites,
-          evidence: result.profile.evidence,
-          evidence_kind: evidenceKind,
-          estimated_difficulty: result.profile.estimated_difficulty,
-          confidence: result.profile.confidence,
-          // Statement-only profiles stay provisional.
-          is_provisional: evidenceKind === "statement_only",
-          safe_tags: safeTagsFrom(result.profile, evidenceKind),
-          input_hash: result.inputHash,
-          classifier_version: result.classifierVersion,
-        },
-        { onConflict: "problem_id,input_hash,classifier_version" },
-      )
-      .select("id")
-      .single();
-
-    if (error) {
-      await finishJob(jobId, "FAILED", { errorCode: "INTERNAL_ERROR", errorDetail: error.message });
+    const profileId = ids.ideaProfile(problemId, result.inputHash, result.classifierVersion);
+    const row: IdeaProfilePrivateRow = {
+      id: profileId,
+      user_id: userId,
+      problem_id: problemId,
+      statement_version: context.problem.current_statement_version,
+      notes_revision: context.notes?.revision ?? null,
+      idea_ids: result.profile.idea_ids,
+      secondary_idea_ids: result.profile.secondary_idea_ids,
+      mechanism: result.profile.mechanism,
+      object_roles: result.profile.object_roles,
+      prerequisites: result.profile.prerequisites,
+      evidence: result.profile.evidence,
+      evidence_kind: evidenceKind,
+      estimated_difficulty: result.profile.estimated_difficulty,
+      confidence: result.profile.confidence,
+      // Statement-only profiles stay provisional.
+      is_provisional: evidenceKind === "statement_only",
+      safe_tags: safeTagsFrom(result.profile, evidenceKind),
+      input_hash: result.inputHash,
+      classifier_version: result.classifierVersion,
+      created_at: nowIso(),
+    };
+    try {
+      await col(COLLECTIONS.ideaProfiles).doc(profileId).set(row);
+    } catch (error) {
+      await finishJob(jobId, "FAILED", { errorCode: "INTERNAL_ERROR", errorDetail: error instanceof Error ? error.message : "write failed" });
       return { failed: true };
     }
 
     await finishJob(jobId, "SUCCEEDED", {
-      result: { profile_id: inserted.id, evidence_kind: evidenceKind },
+      result: { profile_id: profileId, evidence_kind: evidenceKind },
       providerRequestIds: result.usage.requestIds,
     });
     return { classified: true };

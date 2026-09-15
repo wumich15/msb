@@ -2,7 +2,7 @@ import "server-only";
 import { NextResponse } from "next/server";
 import { headers } from "next/headers";
 import { z } from "zod";
-import { AppError, fromPostgresError, statusFor, type ErrorCode } from "@/lib/errors";
+import { AppError, fromFirestoreError, statusFor, type ErrorCode } from "@/lib/errors";
 import { publicConfig } from "@/lib/config";
 
 export function ok<T>(body: T, init?: ResponseInit): NextResponse {
@@ -55,18 +55,11 @@ export function route<Args extends unknown[]>(
       if (error instanceof z.ZodError) {
         return failure("INVALID_REQUEST", error.issues[0]?.message ?? "invalid payload");
       }
-      if (isPostgresError(error)) {
-        const mapped = fromPostgresError(error);
-        return failure(mapped.code, mapped.detail);
-      }
-      console.error("[route] unhandled error", error);
-      return failure("INTERNAL_ERROR");
+      const mapped = fromFirestoreError(error);
+      if (mapped.code === "INTERNAL_ERROR") console.error("[route] unhandled error", error);
+      return failure(mapped.code, mapped.code === "INTERNAL_ERROR" ? undefined : mapped.detail);
     }
   };
-}
-
-function isPostgresError(error: unknown): error is { message: string; details: string | null } {
-  return typeof error === "object" && error !== null && "message" in error && "code" in error;
 }
 
 export async function parseBody<T extends z.ZodType>(request: Request, schema: T): Promise<z.infer<T>> {
@@ -81,10 +74,4 @@ export async function parseBody<T extends z.ZodType>(request: Request, schema: T
     throw new AppError("INVALID_REQUEST", result.error.issues[0]?.message ?? "invalid payload");
   }
   return result.data;
-}
-
-/** Raises the application error a database function signalled through its message. */
-export function assertRpcOk(error: { message?: string; details?: string | null } | null): void {
-  if (!error) return;
-  throw fromPostgresError(error);
 }

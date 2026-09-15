@@ -1,32 +1,20 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { createServerClient } from "@supabase/ssr";
-import { publicConfig } from "@/lib/config";
+import { SESSION_COOKIE } from "@/lib/auth/session-cookie";
 
-/** Refreshes Supabase cookies and keeps private pages behind a verified user. */
-export async function proxy(request: NextRequest) {
-  let response = NextResponse.next({ request });
-  if (!publicConfig.supabaseUrl || !publicConfig.supabasePublishableKey) return response;
-
-  const supabase = createServerClient(publicConfig.supabaseUrl, publicConfig.supabasePublishableKey, {
-    cookies: {
-      getAll: () => request.cookies.getAll(),
-      setAll(cookiesToSet) {
-        for (const { name, value } of cookiesToSet) request.cookies.set(name, value);
-        response = NextResponse.next({ request });
-        for (const { name, value, options } of cookiesToSet) response.cookies.set(name, value, options);
-      },
-    },
-  });
-
-  const { data } = await supabase.auth.getUser();
+/**
+ * Keeps private pages behind a session cookie. This is only a fast presence
+ * check: the pages and every API route verify the cookie with the Admin SDK
+ * (signature, expiry, revocation) before reading or writing anything.
+ */
+export function proxy(request: NextRequest) {
   const isPrivate = request.nextUrl.pathname.startsWith("/workspace") || request.nextUrl.pathname.startsWith("/settings");
-  if (!data.user && isPrivate) {
+  if (isPrivate && !request.cookies.get(SESSION_COOKIE)?.value) {
     const url = request.nextUrl.clone();
     url.pathname = "/signin";
     url.searchParams.set("next", request.nextUrl.pathname);
     return NextResponse.redirect(url);
   }
-  return response;
+  return NextResponse.next();
 }
 
 export const config = {

@@ -1,22 +1,22 @@
-import { requireSession } from "@/lib/auth/session";
-import { assertRpcOk, assertSameOrigin, ok, parseBody, route } from "@/lib/http";
+import { requireSession, ensureProfile } from "@/lib/auth/session";
+import { assertSameOrigin, ok, parseBody, route } from "@/lib/http";
 import { settingsSchema } from "@/lib/validation";
+import { nowIso } from "@/lib/db/admin";
+import { COLLECTIONS, col } from "@/lib/db/collections";
+import { readOne } from "@/lib/db/transactions/shared";
 import type { ProfileRow } from "@/lib/db/types";
 
-export const GET = route(async () => {
-  const { supabase, userId } = await requireSession();
-  const { data, error } = await supabase.from("profiles").select("*").eq("user_id", userId).maybeSingle();
-  assertRpcOk(error);
+const project = (profile: ProfileRow | null) => ({
+  displayName: profile?.display_name ?? null,
+  automaticRecommendations: profile?.automatic_recommendations ?? true,
+  aiDisclosureVersion: profile?.ai_disclosure_version ?? 0,
+  onboardingCompletedAt: profile?.onboarding_completed_at ?? null,
+});
 
-  const profile = data as ProfileRow | null;
-  return ok({
-    profile: {
-      displayName: profile?.display_name ?? null,
-      automaticRecommendations: profile?.automatic_recommendations ?? true,
-      aiDisclosureVersion: profile?.ai_disclosure_version ?? 0,
-      onboardingCompletedAt: profile?.onboarding_completed_at ?? null,
-    },
-  });
+export const GET = route(async () => {
+  const { userId } = await requireSession();
+  const profile = await readOne<ProfileRow>(col(COLLECTIONS.profiles).doc(userId));
+  return ok({ profile: project(profile) });
 });
 
 /**
@@ -26,33 +26,20 @@ export const GET = route(async () => {
  */
 export const PATCH = route(async (request: Request) => {
   await assertSameOrigin();
-  const { supabase, userId } = await requireSession();
+  const { userId, email } = await requireSession();
   const body = await parseBody(request, settingsSchema);
 
-  const patch: Record<string, unknown> = {};
+  const patch: Partial<ProfileRow> = { updated_at: nowIso() };
   if (body.automaticRecommendations !== undefined) patch.automatic_recommendations = body.automaticRecommendations;
   if (body.displayName !== undefined) patch.display_name = body.displayName;
   if (body.acceptAiDisclosureVersion !== undefined) {
     patch.ai_disclosure_version = body.acceptAiDisclosureVersion;
-    patch.ai_disclosure_accepted_at = new Date().toISOString();
-    patch.onboarding_completed_at = new Date().toISOString();
+    patch.ai_disclosure_accepted_at = nowIso();
+    patch.onboarding_completed_at = nowIso();
   }
 
-  const { data, error } = await supabase
-    .from("profiles")
-    .update(patch)
-    .eq("user_id", userId)
-    .select("*")
-    .single();
-  assertRpcOk(error);
-
-  const profile = data as ProfileRow;
-  return ok({
-    profile: {
-      displayName: profile.display_name,
-      automaticRecommendations: profile.automatic_recommendations,
-      aiDisclosureVersion: profile.ai_disclosure_version,
-      onboardingCompletedAt: profile.onboarding_completed_at,
-    },
-  });
+  await ensureProfile(userId, email);
+  await col(COLLECTIONS.profiles).doc(userId).update(patch);
+  const profile = await readOne<ProfileRow>(col(COLLECTIONS.profiles).doc(userId));
+  return ok({ profile: project(profile) });
 });

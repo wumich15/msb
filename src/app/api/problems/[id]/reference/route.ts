@@ -1,12 +1,13 @@
 import { requireSession } from "@/lib/auth/session";
 import { requireOwnedProblem } from "@/lib/auth/ownership";
-import { accepted, assertRpcOk, assertSameOrigin, ok, parseBody, route } from "@/lib/http";
+import { accepted, assertSameOrigin, ok, parseBody, route } from "@/lib/http";
 import { referenceChoiceSchema } from "@/lib/validation";
-import { releaseBudgetReservation, reserveBudget, TOKEN_ESTIMATES } from "@/lib/ai/usage";
+import { releaseBudgetReservation, reserveBudget, reserveExistingJobBudget, TOKEN_ESTIMATES } from "@/lib/ai/usage";
 import { dispatchJobById } from "@/jobs/dispatch";
 import { PREPARATION_LABELS } from "@/lib/db/projections";
-import type { PreparationState } from "@/lib/db/types";
-import { createServiceClient } from "@/lib/db/service";
+import { setPreparationChoice } from "@/lib/db/transactions/assistant";
+import { cancelJob } from "@/lib/db/transactions/jobs";
+import { AppError } from "@/lib/errors";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -19,45 +20,37 @@ type Params = { params: Promise<{ id: string }> };
  */
 export const POST = route(async (request: Request, { params }: Params) => {
   await assertSameOrigin();
-  const { supabase, userId } = await requireSession();
+  const { userId } = await requireSession();
   const { id } = await params;
-  await requireOwnedProblem(supabase, id, userId);
+  await requireOwnedProblem(id, userId);
   const body = await parseBody(request, referenceChoiceSchema);
 
   // Budget is reserved before dispatch and reconciled against actual usage later.
   const reservation = body.choice === "reuse" ? 0 : TOKEN_ESTIMATES["prepare-reference"];
   if (reservation) await reserveBudget(userId, reservation);
 
-  let data: unknown;
+  let result: Awaited<ReturnType<typeof setPreparationChoice>>;
   try {
-    const selected = await supabase.rpc("set_preparation_choice", {
-      p_problem_id: id,
-      p_choice: body.choice,
-      p_expected_statement_version: body.expectedStatementVersion,
-      p_submitted_text: body.choice === "provide" ? (body.workedSolution ?? null) : null,
-    });
-    assertRpcOk(selected.error);
-    data = selected.data;
+    result = await setPreparationChoice(
+      userId,
+      id,
+      body.choice,
+      body.expectedStatementVersion,
+      body.choice === "provide" ? (body.workedSolution ?? null) : null,
+    );
   } catch (error) {
     await releaseBudgetReservation(userId, reservation);
     throw error;
   }
 
-  const result = data as {
-    activation_generation: number;
-    preparation_generation: number;
-    preparation_state: PreparationState;
-    statement_version: number;
-    job_id: string | null;
-  };
-
   if (result.job_id && reservation) {
-    const service = createServiceClient();
-    const { error: reservationError } = await service.from("jobs").update({ reserved_tokens: reservation }).eq("id", result.job_id);
-    if (reservationError) {
-      await releaseBudgetReservation(userId, reservation);
-      await service.from("jobs").update({ run_state: "CANCELLED", error_code: "INTERNAL_ERROR" }).eq("id", result.job_id);
-      throw reservationError;
+    // The request-level reservation is transferred onto the durable job record so
+    // the worker reconciles it exactly once; the count is not reserved twice.
+    await releaseBudgetReservation(userId, reservation);
+    const attached = await reserveExistingJobBudget(result.job_id, reservation).catch(() => false);
+    if (!attached) {
+      await cancelJob(result.job_id, "AI_LIMIT_REACHED");
+      throw new AppError("AI_LIMIT_REACHED", "budget");
     }
   } else if (reservation) {
     await releaseBudgetReservation(userId, reservation);

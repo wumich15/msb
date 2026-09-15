@@ -1,19 +1,17 @@
 import { requireSession } from "@/lib/auth/session";
-import { assertRpcOk, assertSameOrigin, ok, parseBody, route } from "@/lib/http";
+import { assertSameOrigin, ok, parseBody, route } from "@/lib/http";
 import { folderCreateSchema } from "@/lib/validation";
+import { nowIso } from "@/lib/db/admin";
+import { COLLECTIONS, col, newId } from "@/lib/db/collections";
+import { readMany } from "@/lib/db/transactions/shared";
 import type { FolderRow } from "@/lib/db/types";
-import { createServiceClient } from "@/lib/db/service";
+
+const projectFolder = (row: FolderRow) => ({ id: row.id, name: row.name, created_at: row.created_at, updated_at: row.updated_at });
 
 export const GET = route(async () => {
-  const { supabase, userId } = await requireSession();
-  const { data, error } = await supabase
-    .from("folders")
-    .select("id, name, created_at, updated_at")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: true });
-  assertRpcOk(error);
-
-  return ok({ folders: (data ?? []) as Pick<FolderRow, "id" | "name" | "created_at" | "updated_at">[] });
+  const { userId } = await requireSession();
+  const rows = await readMany<FolderRow>(col(COLLECTIONS.folders).where("user_id", "==", userId).orderBy("created_at", "asc"));
+  return ok({ folders: rows.map(projectFolder) });
 });
 
 export const POST = route(async (request: Request) => {
@@ -21,13 +19,9 @@ export const POST = route(async (request: Request) => {
   const { userId } = await requireSession();
   const body = await parseBody(request, folderCreateSchema);
 
-  const service = createServiceClient();
-  const { data, error } = await service
-    .from("folders")
-    .insert({ user_id: userId, name: body.name })
-    .select("id, name, created_at, updated_at")
-    .single();
-  assertRpcOk(error);
+  const now = nowIso();
+  const row: FolderRow = { id: newId(), user_id: userId, name: body.name, created_at: now, updated_at: now };
+  await col(COLLECTIONS.folders).doc(row.id).set(row);
 
-  return ok({ folder: data });
+  return ok({ folder: projectFolder(row) });
 });

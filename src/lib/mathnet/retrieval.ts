@@ -1,13 +1,16 @@
 import "server-only";
 import { createHash } from "node:crypto";
-import { createServiceClient } from "@/lib/db/service";
-import { aiConfig, limits, versions } from "@/lib/config";
-import { embed, toVectorLiteral } from "@/lib/ai/voyage";
-import { callModelForJson, untrustedBlock } from "@/lib/ai/anthropic";
+import { FieldValue, type Query } from "firebase-admin/firestore";
+import { COLLECTIONS, col } from "@/lib/db/collections";
+import { aiConfig, limits, mathnetConfig, versions } from "@/lib/config";
+import { embed } from "@/lib/ai/voyage";
+import { callModelForJson, untrustedBlock } from "@/lib/ai/openai";
 import { rerankResultSchema } from "@/lib/ai/schemas";
 import { rerankerPrompt } from "@/prompts";
 import { ideaLabel, ideasToText } from "@/lib/mathnet/taxonomy";
-import type { MathnetProblemRow } from "@/lib/db/types";
+import { lexicalScore, queryTerms } from "@/lib/mathnet/lexical";
+import { mathnetExclusionsForUser, readActiveRelease } from "@/lib/db/transactions/mathnet";
+import type { MathnetProblemRow, MathnetSolutionDataPrivateRow } from "@/lib/db/types";
 
 /**
  * The retrieval pipeline shared by both recommendation entry points.
@@ -64,15 +67,19 @@ export function profileHashFor(source: RetrievalSource): string {
     .digest("hex");
 }
 
-async function activeRelease(): Promise<{ id: string; index_version: number } | null> {
-  const supabase = createServiceClient();
-  const { data, error } = await supabase
-    .from("mathnet_releases")
-    .select("id, index_version")
-    .eq("is_active", true)
-    .maybeSingle();
-  if (error) throw new Error(`active MathNET release lookup failed: ${error.message}`);
-  return (data as { id: string; index_version: number } | null) ?? null;
+/** The complete cache identity of one recommendation run. */
+export function recommendationCacheKey(input: {
+  userId: string;
+  problemId: string;
+  statementVersion: number;
+  notesRevision: number | null;
+  profileHash: string;
+  releaseId: string | null;
+  indexVersion: number;
+}): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ ...input, retrieval: versions.retrieval }))
+    .digest("hex");
 }
 
 /**
@@ -104,23 +111,120 @@ export function fuseRankedLists(lists: Array<{ source: keyof typeof FUSION_WEIGH
     .sort((a, b) => b.fusionScore - a.fusionScore);
 }
 
+export function cosineDistance(a: number[], b: number[]): number {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  const length = Math.min(a.length, b.length);
+  for (let index = 0; index < length; index += 1) {
+    const x = a[index] ?? 0;
+    const y = b[index] ?? 0;
+    dot += x * y;
+    normA += x * x;
+    normB += y * y;
+  }
+  if (normA === 0 || normB === 0) return 1;
+  return 1 - dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+type SolutionRow = MathnetSolutionDataPrivateRow & { id: string };
+
+function eligibleQuery(releaseId: string): Query {
+  return col(COLLECTIONS.mathnetSolutionData).where("release_id", "==", releaseId).where("is_eligible", "==", true);
+}
+
+/**
+ * Nearest neighbours by one vector field. Firestore cannot exclude an arbitrary
+ * id list in the query, so the window is widened and exclusions are removed
+ * afterwards; if too few survive, the window is enlarged once.
+ */
+async function vectorCandidates(
+  releaseId: string,
+  field: "statement_embedding" | "idea_embedding",
+  vector: number[],
+  excluded: Set<string>,
+  limitCount: number,
+): Promise<string[]> {
+  const mode = mathnetConfig().vectorMode;
+  const run = async (window: number): Promise<string[]> => {
+    if (mode === "exact") {
+      const rows = await eligibleQuery(releaseId).select(field).get();
+      return rows.docs
+        .map((doc) => ({ id: doc.id, distance: cosineDistance(vector, vectorArray(doc.get(field))) }))
+        .filter((row) => !excluded.has(row.id))
+        .sort((a, b) => a.distance - b.distance)
+        .slice(0, limitCount)
+        .map((row) => row.id);
+    }
+    const snapshot = await eligibleQuery(releaseId)
+      .findNearest({
+        vectorField: field,
+        queryVector: FieldValue.vector(vector),
+        limit: Math.min(window, 1000),
+        distanceMeasure: "COSINE",
+        distanceResultField: "vector_distance",
+      })
+      .get();
+    return snapshot.docs.map((doc) => doc.id).filter((id) => !excluded.has(id)).slice(0, limitCount);
+  };
+  const first = await run(limitCount + excluded.size);
+  if (first.length >= limitCount || mode === "exact") return first;
+  return run((limitCount + excluded.size) * 3);
+}
+
+function vectorArray(value: unknown): number[] {
+  if (Array.isArray(value)) return value as number[];
+  const maybe = value as { toArray?: () => number[] } | null;
+  if (maybe && typeof maybe.toArray === "function") return maybe.toArray();
+  return [];
+}
+
+/** Lexical + idea-tag candidates, scored in memory over a bounded window. */
+async function lexicalCandidates(
+  releaseId: string,
+  statement: string,
+  ideaIds: string[],
+  excluded: Set<string>,
+  limitCount: number,
+): Promise<string[]> {
+  const terms = queryTerms(`${statement.slice(0, 1_500)} ${ideaIds.map(ideaLabel).join(" ")}`);
+  const window = Math.min(300, (limitCount + excluded.size) * 4);
+  const scored = new Map<string, number>();
+  const ideaSet = new Set(ideaIds);
+
+  const consider = (doc: FirebaseFirestore.QueryDocumentSnapshot) => {
+    if (excluded.has(doc.id)) return;
+    const data = doc.data() as MathnetSolutionDataPrivateRow;
+    const shared = (data.idea_ids ?? []).filter((id) => ideaSet.has(id)).length;
+    const score = lexicalScore(data.search_terms ?? [], terms, shared);
+    if (score > 0) scored.set(doc.id, Math.max(scored.get(doc.id) ?? 0, score));
+  };
+
+  if (terms.length > 0) {
+    const snapshot = await eligibleQuery(releaseId).where("search_terms", "array-contains-any", terms).limit(window).get();
+    snapshot.docs.forEach(consider);
+  }
+  if (ideaIds.length > 0) {
+    const snapshot = await eligibleQuery(releaseId).where("idea_ids", "array-contains-any", ideaIds.slice(0, 30)).limit(window).get();
+    snapshot.docs.forEach(consider);
+  }
+  return [...scored.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limitCount)
+    .map(([id]) => id);
+}
+
 export async function retrieveRelatedProblems(source: RetrievalSource): Promise<RetrievalResult> {
-  const supabase = createServiceClient();
   const usage = { inputTokens: 0, outputTokens: 0, requestIds: [] as string[] };
   const profileHash = profileHashFor(source);
 
-  const release = await activeRelease();
+  const release = await readActiveRelease();
   if (!release) {
     return { state: "NO_MATCH", items: [], releaseId: null, indexVersion: 0, profileHash, usage };
   }
 
   // Everything the learner has already seen, refiltered on every run.
-  const { data: exclusionData, error: exclusionError } = await supabase.rpc("mathnet_exclusions_for_user", {
-    p_user_id: source.userId,
-    p_problem_id: source.problemId,
-  });
-  if (exclusionError) throw new Error(`MathNET exclusions failed: ${exclusionError.message}`);
-  const exclusions = (exclusionData as string[] | null) ?? [];
+  const excluded = new Set(await mathnetExclusionsForUser(source.userId, source.problemId, release.id));
 
   const ideaText = ideasToText(source.ideaIds, source.mechanism);
   const embeddings = await embed([source.statement, ideaText || source.statement], "query");
@@ -130,34 +234,15 @@ export async function retrieveRelatedProblems(source: RetrievalSource): Promise<
 
   // The three candidate queries run in parallel against one database.
   const [byStatement, byIdea, byText] = await Promise.all([
-    supabase.rpc("match_mathnet_by_statement", {
-      p_release_id: release.id,
-      p_embedding: toVectorLiteral(statementVector ?? []),
-      p_limit: perSource,
-      p_exclude_ids: exclusions,
-    }),
-    supabase.rpc("match_mathnet_by_idea", {
-      p_release_id: release.id,
-      p_embedding: toVectorLiteral(ideaVector ?? statementVector ?? []),
-      p_limit: perSource,
-      p_exclude_ids: exclusions,
-    }),
-    supabase.rpc("match_mathnet_by_text", {
-      p_release_id: release.id,
-      p_query: `${source.statement.slice(0, 600)} ${source.ideaIds.map(ideaLabel).join(" ")}`,
-      p_idea_ids: source.ideaIds,
-      p_limit: perSource,
-      p_exclude_ids: exclusions,
-    }),
+    vectorCandidates(release.id, "statement_embedding", statementVector ?? [], excluded, perSource),
+    vectorCandidates(release.id, "idea_embedding", ideaVector ?? statementVector ?? [], excluded, perSource),
+    lexicalCandidates(release.id, source.statement, source.ideaIds, excluded, perSource),
   ]);
-  for (const result of [byStatement, byIdea, byText]) {
-    if (result.error) throw new Error(`MathNET candidate retrieval failed: ${result.error.message}`);
-  }
 
   const fused = fuseRankedLists([
-    { source: "statement", ids: rowIds(byStatement.data) },
-    { source: "idea", ids: rowIds(byIdea.data) },
-    { source: "lexical", ids: rowIds(byText.data) },
+    { source: "statement", ids: byStatement },
+    { source: "idea", ids: byIdea },
+    { source: "lexical", ids: byText },
   ]);
 
   if (fused.length === 0) {
@@ -165,27 +250,19 @@ export async function retrieveRelatedProblems(source: RetrievalSource): Promise<
   }
 
   const shortlist = fused.slice(0, limits.rerankCandidates);
-  const { data: problemRows, error: problemError } = await supabase
-    .from("mathnet_problems")
-    .select("id, source_id, title, statement_markdown, topics, competition, country")
-    .in("id", shortlist.map((candidate) => candidate.mathnetProblemId));
-  if (problemError) throw new Error(`MathNET candidate load failed: ${problemError.message}`);
-
-  const problems = new Map(
-    ((problemRows ?? []) as MathnetProblemRow[]).map((row) => [row.id, row]),
-  );
-
+  const shortlistIds = shortlist.map((candidate) => candidate.mathnetProblemId);
+  const [problemDocs, profileDocs] = await Promise.all([
+    col(COLLECTIONS.mathnetProblems).firestore.getAll(...shortlistIds.map((id) => col(COLLECTIONS.mathnetProblems).doc(id))),
+    col(COLLECTIONS.mathnetSolutionData).firestore.getAll(
+      ...shortlistIds.map((id) => col(COLLECTIONS.mathnetSolutionData).doc(id)),
+      { fieldMask: ["idea_ids", "mechanism", "confidence"] },
+    ),
+  ]);
+  const problems = new Map<string, MathnetProblemRow>();
+  for (const doc of problemDocs) if (doc.exists) problems.set(doc.id, { ...(doc.data() as MathnetProblemRow), id: doc.id });
   // Compact candidate profiles: solution text never enters this prompt.
-  const { data: profileRows, error: profileError } = await supabase
-    .from("mathnet_solution_data")
-    .select("mathnet_problem_id, idea_ids, mechanism, confidence")
-    .in("mathnet_problem_id", shortlist.map((candidate) => candidate.mathnetProblemId));
-  if (profileError) throw new Error(`MathNET profile load failed: ${profileError.message}`);
-
-  const profiles = new Map(
-    ((profileRows ?? []) as Array<{ mathnet_problem_id: string; idea_ids: string[]; mechanism: string | null; confidence: number }>)
-      .map((row) => [row.mathnet_problem_id, row]),
-  );
+  const profiles = new Map<string, Pick<SolutionRow, "idea_ids" | "mechanism" | "confidence">>();
+  for (const doc of profileDocs) if (doc.exists) profiles.set(doc.id, doc.data() as SolutionRow);
 
   const candidateBlock = shortlist
     .map((candidate) => {
@@ -227,7 +304,7 @@ export async function retrieveRelatedProblems(source: RetrievalSource): Promise<
 
     noConfidentMatch = result.value.no_confident_match;
     // Candidate ids must come from the retrieved set; anything else is discarded.
-    const allowed = new Set(shortlist.map((candidate) => candidate.mathnetProblemId));
+    const allowed = new Set(shortlistIds);
     ranked = result.value.results.filter((entry) => allowed.has(entry.candidate_id));
   } catch {
     // Without a reranker, fall back to fusion order but keep the results tentative.
@@ -254,11 +331,4 @@ export async function retrieveRelatedProblems(source: RetrievalSource): Promise<
   }));
 
   return { state: "READY", items, releaseId: release.id, indexVersion: release.index_version, profileHash, usage };
-}
-
-function rowIds(rows: unknown): string[] {
-  if (!Array.isArray(rows)) return [];
-  return rows
-    .map((row) => (row as { mathnet_problem_id?: string }).mathnet_problem_id)
-    .filter((id): id is string => typeof id === "string");
 }

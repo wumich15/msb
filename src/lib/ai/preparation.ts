@@ -1,6 +1,6 @@
 import "server-only";
 import { aiConfig, limits } from "@/lib/config";
-import { callModelForJson, untrustedBlock } from "@/lib/ai/anthropic";
+import { callModelForJson, untrustedBlock } from "@/lib/ai/openai";
 import {
   checkPasses,
   checkResultSchema,

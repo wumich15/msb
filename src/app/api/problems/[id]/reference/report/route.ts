@@ -1,7 +1,8 @@
 import { requireSession } from "@/lib/auth/session";
 import { requireOwnedProblem } from "@/lib/auth/ownership";
-import { assertRpcOk, assertSameOrigin, ok, parseBody, route } from "@/lib/http";
+import { assertSameOrigin, ok, parseBody, route } from "@/lib/http";
 import { reportSchema } from "@/lib/validation";
+import { reportReference } from "@/lib/db/transactions/assistant";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -12,13 +13,12 @@ type Params = { params: Promise<{ id: string }> };
  */
 export const POST = route(async (request: Request, { params }: Params) => {
   await assertSameOrigin();
-  const { supabase, userId } = await requireSession();
+  const { userId } = await requireSession();
   const { id } = await params;
-  await requireOwnedProblem(supabase, id, userId);
+  await requireOwnedProblem(id, userId);
   const body = await parseBody(request, reportSchema);
 
-  const { error } = await supabase.rpc("report_reference", { p_problem_id: id, p_reason: body.reason });
-  assertRpcOk(error);
+  await reportReference(userId, id, body.reason);
 
   return ok({
     reported: true,

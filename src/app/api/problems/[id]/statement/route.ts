@@ -1,10 +1,13 @@
 import { requireSession } from "@/lib/auth/session";
-import { requireOwnedProblem } from "@/lib/auth/ownership";
-import { assertRpcOk, assertSameOrigin, ok, parseBody, route } from "@/lib/http";
+import { assertSameOrigin, ok, parseBody, route } from "@/lib/http";
 import { statementSchema } from "@/lib/validation";
-import { createServiceClient } from "@/lib/db/service";
 import { reserveExistingJobBudget, TOKEN_ESTIMATES } from "@/lib/ai/usage";
 import { dispatchJobById } from "@/jobs/dispatch";
+import { COLLECTIONS, col } from "@/lib/db/collections";
+import { readOne } from "@/lib/db/transactions/shared";
+import { saveStatement } from "@/lib/db/transactions/core";
+import { cancelJob, enqueueJob } from "@/lib/db/transactions/jobs";
+import type { NotesRow, ProfileRow } from "@/lib/db/types";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -15,42 +18,32 @@ type Params = { params: Promise<{ id: string }> };
  */
 export const PUT = route(async (request: Request, { params }: Params) => {
   await assertSameOrigin();
-  const { supabase, userId } = await requireSession();
+  const { userId } = await requireSession();
   const { id } = await params;
-  await requireOwnedProblem(supabase, id, userId);
-
   const body = await parseBody(request, statementSchema);
 
-  const { data, error } = await supabase.rpc("save_statement", {
-    p_problem_id: id,
-    p_expected_version: body.expectedVersion,
-    p_statement: body.statement,
-  });
-  assertRpcOk(error);
+  const version = await saveStatement(userId, id, body.expectedVersion, body.statement);
 
-  const version = data as number;
   if (version !== body.expectedVersion && body.statement.trim().length >= 80) {
-    const service = createServiceClient();
-    const [{ data: profile }, { data: notes }] = await Promise.all([
-      service.from("profiles").select("automatic_recommendations").eq("user_id", userId).maybeSingle(),
-      service.from("notes").select("revision").eq("problem_id", id).eq("user_id", userId).maybeSingle(),
+    const [profile, notes] = await Promise.all([
+      readOne<ProfileRow>(col(COLLECTIONS.profiles).doc(userId)),
+      readOne<NotesRow>(col(COLLECTIONS.notes).doc(id)),
     ]);
+    // Provisional statement-only classification, only when the account allows it.
     if (profile?.automatic_recommendations !== false) {
-      const { data: jobId } = await service.rpc("enqueue_job", {
-        p_user_id: userId,
-        p_job_type: "classify-problem",
-        p_problem_id: id,
-        p_input: { reason: "statement_saved" },
-        p_idempotency_key: `classify:statement:${id}:${version}`,
-        p_activation_generation: null,
-        p_preparation_generation: null,
-        p_statement_version: version,
-        p_notes_revision: notes?.revision ?? null,
-      });
-      if (jobId && await reserveExistingJobBudget(jobId as string, TOKEN_ESTIMATES["classify-problem"]).catch(() => false)) {
-        await dispatchJobById(jobId as string).catch(() => undefined);
+      const jobId = await enqueueJob({
+        userId,
+        jobType: "classify-problem",
+        problemId: id,
+        input: { reason: "statement_saved" },
+        idempotencyKey: `classify:statement:${id}:${version}`,
+        statementVersion: version,
+        notesRevision: notes?.revision ?? null,
+      }).catch(() => null);
+      if (jobId && (await reserveExistingJobBudget(jobId, TOKEN_ESTIMATES["classify-problem"]).catch(() => false))) {
+        await dispatchJobById(jobId).catch(() => undefined);
       } else if (jobId) {
-        await service.from("jobs").update({ run_state: "CANCELLED", error_code: "AI_LIMIT_REACHED" }).eq("id", jobId as string);
+        await cancelJob(jobId, "AI_LIMIT_REACHED");
       }
     }
   }

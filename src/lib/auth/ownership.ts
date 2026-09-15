@@ -1,51 +1,30 @@
 import "server-only";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import { COLLECTIONS, col } from "@/lib/db/collections";
 import { AppError } from "@/lib/errors";
+import { readOne } from "@/lib/db/transactions/shared";
 import type { FolderRow, ProblemRow } from "@/lib/db/types";
 
 /**
- * Ownership helpers. Workers hold a privileged client that bypasses row-level
- * security, so they call these with an explicit userId rather than trusting the
- * job payload.
+ * Ownership helpers. The Admin SDK bypasses security rules, so routes and
+ * workers alike call these with the verified user id rather than trusting a
+ * client-supplied owner field or a job payload.
  */
 
-export async function requireOwnedProblem(
-  supabase: SupabaseClient,
-  problemId: string,
-  userId: string,
-): Promise<ProblemRow> {
-  const { data, error } = await supabase
-    .from("problems")
-    .select("*")
-    .eq("id", problemId)
-    .eq("user_id", userId)
-    .maybeSingle();
-
-  if (error) throw new AppError("INTERNAL_ERROR", error.message);
+export async function requireOwnedProblem(problemId: string, userId: string): Promise<ProblemRow> {
+  const problem = await readOne<ProblemRow>(col(COLLECTIONS.problems).doc(problemId));
   // A record belonging to another account is reported as absent.
-  if (!data) throw new AppError("NOT_FOUND");
-  return data as ProblemRow;
+  if (!problem || problem.user_id !== userId) throw new AppError("NOT_FOUND");
+  return problem;
 }
 
-export async function requireOwnedFolder(
-  supabase: SupabaseClient,
-  folderId: string,
-  userId: string,
-): Promise<FolderRow> {
-  const { data, error } = await supabase
-    .from("folders")
-    .select("*")
-    .eq("id", folderId)
-    .eq("user_id", userId)
-    .maybeSingle();
-
-  if (error) throw new AppError("INTERNAL_ERROR", error.message);
-  if (!data) throw new AppError("NOT_FOUND");
-  return data as FolderRow;
+export async function requireOwnedFolder(folderId: string, userId: string): Promise<FolderRow> {
+  const folder = await readOne<FolderRow>(col(COLLECTIONS.folders).doc(folderId));
+  if (!folder || folder.user_id !== userId) throw new AppError("NOT_FOUND");
+  return folder;
 }
 
 /** True when the account still exists; workers recheck before storing results. */
-export async function accountStillExists(supabase: SupabaseClient, userId: string): Promise<boolean> {
-  const { data } = await supabase.from("profiles").select("user_id").eq("user_id", userId).maybeSingle();
-  return Boolean(data);
+export async function accountStillExists(userId: string): Promise<boolean> {
+  const snapshot = await col(COLLECTIONS.profiles).doc(userId).get();
+  return snapshot.exists;
 }

@@ -1,14 +1,24 @@
 import { requireSession } from "@/lib/auth/session";
 import { requireOwnedProblem } from "@/lib/auth/ownership";
-import { accepted, assertRpcOk, assertSameOrigin, ok, parseBody, route } from "@/lib/http";
+import { accepted, assertSameOrigin, ok, parseBody, route } from "@/lib/http";
 import { similarSchema } from "@/lib/validation";
-import { createServiceClient } from "@/lib/db/service";
 import { projectRecommendation } from "@/lib/db/projections";
-import { releaseBudgetReservation, reserveBudget, TOKEN_ESTIMATES } from "@/lib/ai/usage";
+import { releaseBudgetReservation, reserveBudget, reserveExistingJobBudget, TOKEN_ESTIMATES } from "@/lib/ai/usage";
 import { dispatchJobById } from "@/jobs/dispatch";
-import { profileHashFor } from "@/lib/mathnet/retrieval";
-import { versions } from "@/lib/config";
-import type { IdeaProfilePrivateRow, MathnetProblemRow, RecommendationItemRow, RecommendationRunRow } from "@/lib/db/types";
+import { profileHashFor, recommendationCacheKey } from "@/lib/mathnet/retrieval";
+import { COLLECTIONS, col, ids } from "@/lib/db/collections";
+import { readMany, readOne } from "@/lib/db/transactions/shared";
+import { cancelJob, enqueueJob } from "@/lib/db/transactions/jobs";
+import { readActiveRelease } from "@/lib/db/transactions/mathnet";
+import { AppError } from "@/lib/errors";
+import type {
+  IdeaProfilePrivateRow,
+  MathnetProblemRow,
+  NotesRow,
+  ProblemVersionRow,
+  RecommendationItemRow,
+  RecommendationRunRow,
+} from "@/lib/db/types";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -22,23 +32,28 @@ type Params = { params: Promise<{ id: string }> };
  */
 export const POST = route(async (request: Request, { params }: Params) => {
   await assertSameOrigin();
-  const { supabase, userId } = await requireSession();
+  const { userId } = await requireSession();
   const { id } = await params;
-  const problem = await requireOwnedProblem(supabase, id, userId);
+  const problem = await requireOwnedProblem(id, userId);
   const body = await parseBody(request, similarSchema);
 
-  const service = createServiceClient();
-
   if (!body.refresh) {
-    const cacheInputs = await Promise.all([
-      service.from("problem_versions").select("statement_markdown").eq("problem_id", id).eq("version", problem.current_statement_version).maybeSingle(),
-      service.from("notes").select("revision").eq("problem_id", id).maybeSingle(),
-      service.from("problem_idea_profiles").select("*").eq("user_id", userId).eq("problem_id", id).eq("statement_version", problem.current_statement_version).order("created_at", { ascending: false }).limit(1).maybeSingle(),
-      service.from("mathnet_releases").select("id, index_version").eq("is_active", true).maybeSingle(),
+    const [statement, notes, profiles, release] = await Promise.all([
+      problem.current_statement_version > 0
+        ? readOne<ProblemVersionRow>(col(COLLECTIONS.problemVersions).doc(ids.versionDoc(id, problem.current_statement_version)))
+        : Promise.resolve(null),
+      readOne<NotesRow>(col(COLLECTIONS.notes).doc(id)),
+      readMany<IdeaProfilePrivateRow>(
+        col(COLLECTIONS.ideaProfiles)
+          .where("user_id", "==", userId)
+          .where("problem_id", "==", id)
+          .where("statement_version", "==", problem.current_statement_version)
+          .orderBy("created_at", "desc")
+          .limit(1),
+      ),
+      readActiveRelease(),
     ]);
-    for (const input of cacheInputs) assertRpcOk(input.error);
-    const [{ data: statement }, { data: notes }, { data: profile }, { data: release }] = cacheInputs;
-    const ideaProfile = profile as IdeaProfilePrivateRow | null;
+    const ideaProfile = profiles[0] ?? null;
     const profileHash = profileHashFor({
       problemId: id,
       userId,
@@ -48,16 +63,16 @@ export const POST = route(async (request: Request, { params }: Params) => {
       mechanism: ideaProfile?.mechanism ?? null,
       hasSolutionEvidence: ideaProfile?.evidence_kind === "checked_reference" || ideaProfile?.evidence_kind === "user_supplied_work",
     });
-    const cached = await readCachedRun(
-      service,
+    const cacheKey = recommendationCacheKey({
       userId,
-      id,
-      problem.current_statement_version,
-      notes?.revision ?? null,
+      problemId: id,
+      statementVersion: problem.current_statement_version,
+      notesRevision: notes?.revision ?? null,
       profileHash,
-      release?.id ?? null,
-      release?.index_version ?? 0,
-    );
+      releaseId: release?.id ?? null,
+      indexVersion: release?.index_version ?? 0,
+    });
+    const cached = await readCachedRun(userId, cacheKey);
     if (cached) return ok(cached);
   }
 
@@ -67,86 +82,55 @@ export const POST = route(async (request: Request, { params }: Params) => {
   // A manual search is an explicit request for AI processing, so it runs whatever
   // the automatic-recommendation preference says.
   const idempotencyKey = `recommend:${id}:${problem.current_statement_version}:${Date.now()}`;
-  const { data: jobId, error } = await service.rpc("enqueue_job", {
-    p_user_id: userId,
-    p_job_type: "recommend-problems",
-    p_problem_id: id,
-    p_input: { trigger: "manual" },
-    p_idempotency_key: idempotencyKey,
-    p_activation_generation: null,
-    p_preparation_generation: null,
-    p_statement_version: problem.current_statement_version,
-    p_notes_revision: null,
-  });
+  let jobId: string;
   try {
-    assertRpcOk(error);
-  } catch (enqueueError) {
+    jobId = await enqueueJob({
+      userId,
+      jobType: "recommend-problems",
+      problemId: id,
+      input: { trigger: "manual" },
+      idempotencyKey,
+      statementVersion: problem.current_statement_version,
+    });
+  } catch (error) {
     await releaseBudgetReservation(userId, reservation);
-    throw enqueueError;
+    throw error;
   }
-  const { error: reservationError } = await service.from("jobs").update({ reserved_tokens: reservation }).eq("id", jobId as string);
-  if (reservationError) {
-    await releaseBudgetReservation(userId, reservation);
-    await service.from("jobs").update({ run_state: "CANCELLED", error_code: "INTERNAL_ERROR" }).eq("id", jobId as string);
-    throw reservationError;
+  // Transfer the request-level reservation onto the job so the worker reconciles it once.
+  await releaseBudgetReservation(userId, reservation);
+  if (!(await reserveExistingJobBudget(jobId, reservation).catch(() => false))) {
+    await cancelJob(jobId, "AI_LIMIT_REACHED");
+    throw new AppError("AI_LIMIT_REACHED", "budget");
   }
 
-  await dispatchJobById(jobId as string).catch(() => undefined);
+  await dispatchJobById(jobId).catch(() => undefined);
   return accepted({ jobId, state: "QUEUED", items: [] });
 });
 
-async function readCachedRun(
-  service: ReturnType<typeof createServiceClient>,
-  userId: string,
-  problemId: string,
-  statementVersion: number,
-  notesRevision: number | null,
-  profileHash: string,
-  releaseId: string | null,
-  indexVersion: number,
-) {
-  let query = service
-    .from("recommendation_runs")
-    .select("*")
-    .eq("user_id", userId)
-    .eq("problem_id", problemId)
-    .eq("statement_version", statementVersion)
-    .eq("profile_hash", profileHash)
-    .eq("index_version", indexVersion)
-    .eq("retrieval_version", versions.retrieval)
-    .in("state", ["READY", "NO_MATCH"])
-    .order("created_at", { ascending: false })
-    .limit(1);
-  query = notesRevision === null ? query.is("notes_revision", null) : query.eq("notes_revision", notesRevision);
-  query = releaseId === null ? query.is("release_id", null) : query.eq("release_id", releaseId);
-  const { data: runRows, error: runError } = await query;
-  assertRpcOk(runError);
+async function readCachedRun(userId: string, cacheKey: string) {
+  const runs = await readMany<RecommendationRunRow>(
+    col(COLLECTIONS.recommendationRuns)
+      .where("cache_key", "==", cacheKey)
+      .where("state", "in", ["READY", "NO_MATCH"])
+      .orderBy("created_at", "desc")
+      .limit(1),
+  );
+  const run = runs[0];
+  if (!run || run.user_id !== userId) return null;
 
-  const run = ((runRows ?? [])[0] as RecommendationRunRow | undefined) ?? null;
-  if (!run) return null;
-
-  const { data: itemRows, error: itemError } = await service
-    .from("recommendation_items")
-    .select("*")
-    .eq("run_id", run.id)
-    .eq("user_id", userId)
-    .order("rank");
-  assertRpcOk(itemError);
-
-  // Saved and dismissed entries are refiltered on every read, not only at build time.
-  const items = ((itemRows ?? []) as RecommendationItemRow[]).filter(
-    (item) => item.dismissed_at === null && item.saved_problem_id === null,
+  const itemRows = await readMany<RecommendationItemRow>(
+    col(COLLECTIONS.recommendationItems).where("run_id", "==", run.id).where("user_id", "==", userId).orderBy("rank", "asc"),
   );
 
+  // Saved and dismissed entries are refiltered on every read, not only at build time.
+  const items = itemRows.filter((item) => item.dismissed_at === null && item.saved_problem_id === null);
   if (items.length === 0) return { runId: run.id, state: run.state, items: [], cached: true };
 
-  const { data: problemRows, error: problemError } = await service
-    .from("mathnet_problems")
-    .select("*")
-    .in("id", items.map((item) => item.mathnet_problem_id));
-  assertRpcOk(problemError);
-
-  const problems = new Map(((problemRows ?? []) as MathnetProblemRow[]).map((row) => [row.id, row]));
+  const docs = await col(COLLECTIONS.mathnetProblems).firestore.getAll(
+    ...items.map((item) => col(COLLECTIONS.mathnetProblems).doc(item.mathnet_problem_id)),
+  );
+  const problems = new Map<string, MathnetProblemRow>();
+  for (const doc of docs) if (doc.exists) problems.set(doc.id, { ...(doc.data() as MathnetProblemRow), id: doc.id });
 
   return {
     runId: run.id,

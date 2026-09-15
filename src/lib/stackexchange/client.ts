@@ -1,6 +1,7 @@
 import "server-only";
 import { createHash } from "node:crypto";
-import { createServiceClient } from "@/lib/db/service";
+import { COLLECTIONS, col } from "@/lib/db/collections";
+import type { MseLookupCacheRow } from "@/lib/db/types";
 import { limits, stackExchangeConfig } from "@/lib/config";
 import { AppError } from "@/lib/errors";
 import { licenseForPost } from "./license";
@@ -60,15 +61,11 @@ function cacheKey(queries: string[], params: Record<string, string>): string {
   return createHash("sha256").update(payload).digest("hex");
 }
 
-async function readCache(key: string) {
-  const supabase = createServiceClient();
-  const { data } = await supabase
-    .from("mse_lookup_cache")
-    .select("*")
-    .eq("cache_key", key)
-    .gt("expires_at", new Date().toISOString())
-    .maybeSingle();
-  return data;
+async function readCache(key: string): Promise<MseLookupCacheRow | null> {
+  const snapshot = await col(COLLECTIONS.mseLookupCache).doc(key).get();
+  if (!snapshot.exists) return null;
+  const row = snapshot.data() as MseLookupCacheRow;
+  return row.expires_at > new Date().toISOString() ? row : null;
 }
 
 async function writeCache(
@@ -79,17 +76,24 @@ async function writeCache(
   response: unknown,
 ): Promise<void> {
   if (outcome === "unavailable") return; // Never cache an outage as an answer.
-  const supabase = createServiceClient();
   const ttl = stackExchangeConfig().cacheTtlSeconds;
-  await supabase.from("mse_lookup_cache").upsert({
+  const row: MseLookupCacheRow = {
     cache_key: key,
     normalized_query: normalizedQuery,
     api_params: params,
-    response: response as Record<string, unknown>,
+    response,
     outcome,
     fetched_at: new Date().toISOString(),
     expires_at: new Date(Date.now() + ttl * 1000).toISOString(),
-  });
+  };
+  await col(COLLECTIONS.mseLookupCache).doc(key).set(row);
+}
+
+/** Cached third-party lookups age out on the export-cleanup schedule. */
+export async function deleteExpiredLookups(): Promise<number> {
+  const snapshot = await col(COLLECTIONS.mseLookupCache).where("expires_at", "<", new Date().toISOString()).limit(200).get();
+  await Promise.all(snapshot.docs.map((doc) => doc.ref.delete()));
+  return snapshot.size;
 }
 
 interface ApiWrapper<T> {

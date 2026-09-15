@@ -1,6 +1,5 @@
 import "server-only";
-import type { SupabaseClient } from "@supabase/supabase-js";
-import { AppError } from "@/lib/errors";
+import { readExportSnapshot, type RawExportSnapshot } from "@/lib/db/transactions/export-snapshot";
 import type {
   ChatMessageRow,
   ExportScope,
@@ -9,6 +8,7 @@ import type {
   NotesRow,
   ProblemRow,
   ProblemVersionRow,
+  ReferenceSolutionPrivateRow,
   StudyEventRow,
 } from "@/lib/db/types";
 
@@ -21,6 +21,8 @@ export interface ExportSnapshot {
   events: Map<string, StudyEventRow[]>;
   messages: Map<string, ChatMessageRow[]>;
   ideaProfiles: Map<string, IdeaProfilePrivateRow[]>;
+  /** Populated only when the learner explicitly asked to include references. */
+  references: Map<string, ReferenceSolutionPrivateRow[]>;
   recommendations: Array<{
     problemId: string;
     sourceId: string;
@@ -31,35 +33,14 @@ export interface ExportSnapshot {
   }>;
 }
 
-interface RawSnapshot {
-  snapshotAt: string;
-  folders: FolderRow[];
-  problems: ProblemRow[];
-  statements: ProblemVersionRow[];
-  notes: NotesRow[];
-  events: StudyEventRow[];
-  messages: ChatMessageRow[];
-  ideaProfiles: IdeaProfilePrivateRow[];
-  recommendations: ExportSnapshot["recommendations"];
-}
-
-/** Reads the whole export through one stable database statement/snapshot. */
+/** Reads the whole export through one read-only, consistent database snapshot. */
 export async function readSnapshot(
-  supabase: SupabaseClient,
   userId: string,
   scope: ExportScope,
   scopeId: string | null,
+  includeReferences: boolean,
 ): Promise<ExportSnapshot> {
-  if (scope !== "account" && !scopeId) throw new AppError("INVALID_REQUEST", `${scope} export needs a scope id`);
-  const { data, error } = await supabase.rpc("read_export_snapshot", {
-    p_user_id: userId,
-    p_scope: scope,
-    p_scope_id: scopeId,
-  });
-  if (error) throw new AppError("INTERNAL_ERROR", error.message);
-  const raw = data as RawSnapshot | null;
-  if (!raw) throw new AppError("INTERNAL_ERROR", "empty export snapshot");
-  if (scope !== "account" && raw.problems.length === 0) throw new AppError("NOT_FOUND");
+  const raw: RawExportSnapshot = await readExportSnapshot(userId, scope, scopeId, includeReferences);
 
   return {
     snapshotAt: raw.snapshotAt,
@@ -70,6 +51,7 @@ export async function readSnapshot(
     events: groupBy(raw.events, (row) => row.problem_id),
     messages: groupBy(raw.messages, (row) => row.problem_id),
     ideaProfiles: groupBy(raw.ideaProfiles, (row) => row.problem_id),
+    references: groupBy(raw.references, (row) => row.problem_id),
     recommendations: raw.recommendations,
   };
 }

@@ -1,7 +1,12 @@
 import "server-only";
-import { createServiceClient } from "@/lib/db/service";
 import { limits } from "@/lib/config";
 import { AppError } from "@/lib/errors";
+import {
+  reconcileJobUsage as reconcileJobUsageTx,
+  recordAiUsage,
+  reserveAiBudget,
+  reserveAiBudgetForJob,
+} from "@/lib/db/transactions/usage";
 
 /**
  * Per-account budget. Reserved atomically before dispatch, reconciled against
@@ -10,70 +15,25 @@ import { AppError } from "@/lib/errors";
  */
 
 export async function reserveBudget(userId: string, estimatedTokens: number): Promise<void> {
-  const supabase = createServiceClient();
-  const { data, error } = await supabase.rpc("reserve_ai_budget", {
-    p_user_id: userId,
-    p_tokens: estimatedTokens,
-    p_daily_token_limit: limits.dailyTokenLimit,
-    p_max_concurrent_jobs: limits.maxConcurrentAiJobs,
-  });
-  if (error) throw new AppError("INTERNAL_ERROR", error.message);
-
-  const result = data as { ok: boolean; code?: string; reason?: string };
-  if (!result?.ok) {
-    throw new AppError("AI_LIMIT_REACHED", result?.reason ?? "budget");
-  }
+  const verdict = await reserveAiBudget(userId, estimatedTokens, limits.dailyTokenLimit, limits.maxConcurrentAiJobs);
+  if (!verdict.ok) throw new AppError("AI_LIMIT_REACHED", verdict.reason ?? "budget");
 }
 
 /** Reserves quota for a job already committed with an automatic state change. */
 export async function reserveExistingJobBudget(jobId: string, estimatedTokens: number): Promise<boolean> {
-  const supabase = createServiceClient();
-  const { data, error } = await supabase.rpc("reserve_ai_budget_for_job", {
-    p_job_id: jobId,
-    p_tokens: estimatedTokens,
-    p_daily_token_limit: limits.dailyTokenLimit,
-    p_max_concurrent_jobs: limits.maxConcurrentAiJobs,
-  });
-  if (error) throw new AppError("INTERNAL_ERROR", error.message);
-  return Boolean((data as { ok?: boolean } | null)?.ok);
-}
-
-export async function reconcileUsage(
-  userId: string,
-  reservedTokens: number,
-  actualTokens: number,
-  actualMicroUsd = 0,
-): Promise<void> {
-  const supabase = createServiceClient();
-  await supabase.rpc("record_ai_usage", {
-    p_user_id: userId,
-    p_reserved_tokens: reservedTokens,
-    p_actual_tokens: actualTokens,
-    p_actual_micro_usd: actualMicroUsd,
-  });
+  const verdict = await reserveAiBudgetForJob(jobId, estimatedTokens, limits.dailyTokenLimit, limits.maxConcurrentAiJobs);
+  return verdict.ok;
 }
 
 /** Releases a reservation when a job is rejected before any provider call. */
 export async function releaseBudgetReservation(userId: string, reservedTokens: number): Promise<void> {
   if (reservedTokens <= 0) return;
-  await reconcileUsage(userId, reservedTokens, 0, 0);
+  await recordAiUsage(userId, reservedTokens, 0, 0);
 }
 
 /** Reconciles one durable job exactly once and marks its reservation closed. */
-export async function reconcileJobUsage(
-  jobId: string,
-  _userId: string,
-  _reservedTokens: number,
-  actualTokens: number,
-  actualMicroUsd = 0,
-): Promise<void> {
-  const supabase = createServiceClient();
-  const { error } = await supabase.rpc("reconcile_job_usage", {
-    p_job_id: jobId,
-    p_actual_tokens: actualTokens,
-    p_actual_micro_usd: actualMicroUsd,
-  });
-  if (error) throw new AppError("INTERNAL_ERROR", error.message);
+export async function reconcileJobUsage(jobId: string, actualTokens: number, actualMicroUsd = 0): Promise<void> {
+  await reconcileJobUsageTx(jobId, actualTokens, actualMicroUsd);
 }
 
 /** Rough per-job reservations, refined by measurement rather than guessed again. */

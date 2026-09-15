@@ -1,6 +1,8 @@
 import { inngest, EVENT_NAME, type JobEventData } from "@/jobs/client";
 import { claimJob, finishJob, loadProblemContext } from "@/jobs/runtime";
-import { createServiceClient } from "@/lib/db/service";
+import { COLLECTIONS, col } from "@/lib/db/collections";
+import { readMany, readOne } from "@/lib/db/transactions/shared";
+import { publishOperationalMessage, publishTutorResponse, tutorGate } from "@/lib/db/transactions/assistant";
 import { loadReferenceForWorker } from "@/lib/ai/reference-store";
 import { generateTutorResponse } from "@/lib/ai/tutor";
 import { reconcileJobUsage } from "@/lib/ai/usage";
@@ -25,7 +27,6 @@ export const respondToQuestionFunction = inngest.createFunction(
     const job = await step.run("claim", () => claimJob(jobId));
     if (!job || !problemId) return { skipped: true };
 
-    const supabase = createServiceClient();
     const context = await loadProblemContext(userId, problemId);
     if (!context) {
       await finishJob(jobId, "CANCELLED", { errorCode: "NOT_FOUND" });
@@ -33,52 +34,42 @@ export const respondToQuestionFunction = inngest.createFunction(
     }
 
     // The gate runs again here, before any model call is made.
-    const { data: gate } = await supabase.rpc("tutor_gate", {
-      p_problem_id: problemId,
-      p_user_id: userId,
-      p_activation_generation: job.activation_generation,
-      p_preparation_generation: job.preparation_generation,
-      p_reference_id: (job.input.reference_id as string) ?? null,
-      p_reference_revision: (job.input.reference_revision as number) ?? null,
+    const verdict = await tutorGate(problemId, userId, {
+      activationGeneration: job.activation_generation,
+      preparationGeneration: job.preparation_generation,
+      referenceId: (job.input.reference_id as string) ?? null,
+      referenceRevision: (job.input.reference_revision as number) ?? null,
     });
-
-    const verdict = gate as { ok: boolean; code?: string; reason?: string; reference_id?: string };
-    if (!verdict?.ok) {
-      await finishJob(jobId, "CANCELLED", { errorCode: verdict?.code ?? "STALE_REQUEST", errorDetail: verdict?.reason });
+    if (!verdict.ok) {
+      await finishJob(jobId, "CANCELLED", { errorCode: verdict.code, errorDetail: verdict.reason });
       return { superseded: true };
     }
 
     const messageId = job.input.message_id as string;
-    const { data: userMessage } = await supabase
-      .from("chat_messages")
-      .select("*")
-      .eq("id", messageId)
-      .eq("user_id", userId)
-      .maybeSingle();
-
-    if (!userMessage) {
+    const question = await readOne<ChatMessageRow>(col(COLLECTIONS.chatMessages).doc(messageId));
+    if (!question || question.user_id !== userId) {
       await finishJob(jobId, "CANCELLED", { errorCode: "NOT_FOUND" });
       return { skipped: true };
     }
 
-    const question = userMessage as ChatMessageRow;
     // The gate names the reference; the worker never takes one from the payload.
-    const reference = await loadReferenceForWorker(verdict.reference_id ?? "", userId);
+    const reference = await loadReferenceForWorker(verdict.reference_id, userId);
     if (!reference.artifact) {
       await finishJob(jobId, "CANCELLED", { errorCode: "SOLUTION_NOT_READY" });
       return { skipped: true };
     }
 
     // Only turns about the current statement version enter tutoring context.
-    const { data: history } = await supabase
-      .from("chat_messages")
-      .select("role, content, statement_version")
-      .eq("problem_id", problemId)
-      .eq("user_id", userId)
-      .eq("statement_version", question.statement_version)
-      .neq("id", question.id)
-      .order("created_at", { ascending: true })
-      .limit(20);
+    const history = (
+      await readMany<ChatMessageRow>(
+        col(COLLECTIONS.chatMessages)
+          .where("problem_id", "==", problemId)
+          .where("user_id", "==", userId)
+          .where("statement_version", "==", question.statement_version)
+          .orderBy("created_at", "asc")
+          .limit(21),
+      )
+    ).filter((row) => row.id !== question.id && !row.is_operational);
 
     const requestedMode = (question.response_mode === "operational" ? "default" : question.response_mode) as Exclude<
       TutorResponseMode,
@@ -98,10 +89,10 @@ export const respondToQuestionFunction = inngest.createFunction(
         selectedExcerpt: question.selected_excerpt,
         question: question.content,
         responseMode: requestedMode,
-        history: (history ?? []) as ChatMessageRow[],
+        history,
       });
     } catch (error) {
-      await reconcileJobUsage(jobId, userId, job.reserved_tokens ?? 0, 0);
+      await reconcileJobUsage(jobId, 0);
       await finishJob(jobId, "FAILED", {
         errorCode: "UPSTREAM_UNAVAILABLE",
         errorDetail: error instanceof Error ? error.message : "tutor failed",
@@ -110,17 +101,19 @@ export const respondToQuestionFunction = inngest.createFunction(
       return { failed: true };
     }
 
-    await reconcileJobUsage(
-      jobId,
-      userId,
-      job.reserved_tokens ?? 0,
-      outcome.usage.inputTokens + outcome.usage.outputTokens,
-    );
+    await reconcileJobUsage(jobId, outcome.usage.inputTokens + outcome.usage.outputTokens);
 
     if (outcome.status !== "published") {
       // An abstention and a too-large context are operational messages: they carry
       // no mathematics and are marked as such in the conversation.
-      await publishOperational(problemId, userId, job.id, question.thread_id, outcome.message, job.statement_version ?? 0);
+      await publishOperationalMessage({
+        userId,
+        problemId,
+        jobId,
+        threadId: question.thread_id,
+        text: outcome.message,
+        statementVersion: job.statement_version ?? question.statement_version,
+      });
       await finishJob(jobId, "SUCCEEDED", {
         result: { status: outcome.status },
         providerRequestIds: outcome.usage.requestIds,
@@ -128,18 +121,17 @@ export const respondToQuestionFunction = inngest.createFunction(
       return { status: outcome.status };
     }
 
-    const { data: published } = await supabase.rpc("publish_tutor_response", {
-      p_job_id: jobId,
-      p_content: outcome.response.text,
-      p_response_mode: mapMode(outcome.response.mode, requestedMode),
-      p_cited_note_excerpt: outcome.response.cited_note_excerpt,
-      p_spoiler_level: outcome.response.spoiler_level,
+    const publication = await publishTutorResponse({
+      jobId,
+      content: outcome.response.text,
+      responseMode: mapMode(outcome.response.mode, requestedMode),
+      citedNoteExcerpt: outcome.response.cited_note_excerpt,
+      spoilerLevel: outcome.response.spoiler_level,
     });
 
-    const publication = published as { ok: boolean; code?: string };
-    if (!publication?.ok) {
+    if (!publication.ok) {
       // A newer statement, activation, or preparation decision replaced this run.
-      return { superseded: true, code: publication?.code };
+      return { superseded: true, code: publication.code };
     }
 
     return { status: "published" };
@@ -154,36 +146,4 @@ function mapMode(
   if (modelMode === "stronger_hint") return "stronger_hint";
   if (requestedMode === "discuss_note_question") return "discuss_note_question";
   return "default";
-}
-
-async function publishOperational(
-  problemId: string,
-  userId: string,
-  jobId: string,
-  threadId: string,
-  text: string,
-  statementVersion: number,
-): Promise<void> {
-  const supabase = createServiceClient();
-  const { data: last } = await supabase
-    .from("chat_messages")
-    .select("sequence")
-    .eq("problem_id", problemId)
-    .eq("thread_id", threadId)
-    .order("sequence", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  await supabase.from("chat_messages").insert({
-    user_id: userId,
-    problem_id: problemId,
-    thread_id: threadId,
-    sequence: ((last?.sequence as number | undefined) ?? 0) + 1,
-    role: "assistant",
-    content: text,
-    request_id: `operational:${jobId}`,
-    statement_version: statementVersion,
-    response_mode: "operational",
-    is_operational: true,
-  });
 }

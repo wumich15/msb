@@ -1,0 +1,43 @@
+# Firebase App Hosting configuration for the Next.js application.
+# Secrets are referenced from Secret Manager; never commit credentials here.
+runConfig:
+  minInstances: 0
+  maxInstances: 4
+  concurrency: 80
+  cpu: 1
+  memoryMiB: 1024
+  # Job callbacks (/api/inngest) may run up to five minutes.
+  timeoutSeconds: 300
+
+env:
+  - variable: NEXT_PUBLIC_APP_ORIGIN
+    value: https://REPLACE_WITH_YOUR_DOMAIN
+    availability: [BUILD, RUNTIME]
+  - variable: NEXT_PUBLIC_FIREBASE_API_KEY
+    value: REPLACE
+    availability: [BUILD, RUNTIME]
+  - variable: NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+    value: REPLACE.firebaseapp.com
+    availability: [BUILD, RUNTIME]
+  - variable: NEXT_PUBLIC_FIREBASE_PROJECT_ID
+    value: REPLACE
+    availability: [BUILD, RUNTIME]
+  - variable: NEXT_PUBLIC_FIREBASE_APP_ID
+    value: REPLACE
+    availability: [BUILD, RUNTIME]
+  - variable: FIREBASE_PROJECT_ID
+    value: REPLACE
+  - variable: FIREBASE_STORAGE_BUCKET
+    value: REPLACE.firebasestorage.app
+  - variable: SESSION_COOKIE_DAYS
+    value: "14"
+  - variable: INNGEST_EVENT_KEY
+    secret: INNGEST_EVENT_KEY
+  - variable: INNGEST_SIGNING_KEY
+    secret: INNGEST_SIGNING_KEY
+  - variable: OPENAI_API_KEY
+    secret: OPENAI_API_KEY
+  - variable: VOYAGE_API_KEY
+    secret: VOYAGE_API_KEY
+  - variable: STACK_EXCHANGE_KEY
+    secret: STACK_EXCHANGE_KEY

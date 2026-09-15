@@ -1,10 +1,11 @@
 /**
- * Row shapes for the tables this application reads.
+ * Document shapes for the Firestore collections this application reads.
  *
- * `npm run db:types` regenerates a full `database.types.ts` from a live schema;
- * these narrower interfaces are what application code actually passes around, and
- * they make the safe/unsafe distinction visible: anything ending in `Private` must
- * never be projected to a browser response.
+ * Firestore has no schema, so these interfaces are the schema: every write in
+ * src/lib/db/transactions constructs a complete row of one of these shapes, and
+ * timestamps are ISO-8601 UTC strings so ordering and range queries stay simple.
+ * The safe/unsafe distinction is visible in the names: anything ending in
+ * `Private` must never be projected to a browser response.
  */
 
 export type ProblemStatus = "not_started" | "in_progress" | "complete";
@@ -59,6 +60,29 @@ export interface ProfileRow {
   ai_disclosure_accepted_at: string | null;
   automatic_recommendations: boolean;
   onboarding_completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatThreadRow {
+  id: string;
+  user_id: string;
+  problem_id: string;
+  statement_version: number;
+  /** Sequence numbers are allocated in the transaction that appends a turn. */
+  next_sequence: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AiUsageRow {
+  user_id: string;
+  usage_date: string;
+  reserved_tokens: number;
+  actual_tokens: number;
+  reserved_micro_usd: number;
+  actual_micro_usd: number;
+  job_count: number;
 }
 
 export interface FolderRow {
@@ -152,7 +176,9 @@ export interface ReferenceSolutionPrivateRow {
   model_versions: Record<string, string>;
   prompt_versions: Record<string, string>;
   reported_at: string | null;
+  report_reason: string | null;
   created_at: string;
+  updated_at: string;
 }
 
 export interface ReferenceArtifact {
@@ -244,6 +270,7 @@ export interface JobRow {
   input: Record<string, unknown>;
   idempotency_key: string;
   dispatch_state: JobDispatchState;
+  dispatched_at: string | null;
   run_state: JobRunState;
   attempts: number;
   max_attempts: number;
@@ -255,11 +282,68 @@ export interface JobRow {
   preparation_generation: number | null;
   statement_version: number | null;
   notes_revision: number | null;
+  provider_request_ids: string[];
+  needs_billing_reconciliation: boolean;
   reserved_tokens: number;
   usage_reconciled: boolean;
   expires_at: string | null;
   created_at: string;
   updated_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface MathnetReleaseRow {
+  id: string;
+  dataset_id: string;
+  revision: string;
+  schema_version: string;
+  import_manifest: Record<string, unknown>;
+  imported_count: number;
+  eligible_count: number;
+  exclusion_counts: Record<string, number>;
+  license: string | null;
+  source_url: string | null;
+  checksums: Record<string, string>;
+  index_version: number;
+  is_active: boolean;
+  validated_at: string | null;
+  activated_at: string | null;
+  created_at: string;
+}
+
+/** PRIVATE: source solutions and solution-derived profiles can reveal the trick. */
+export interface MathnetSolutionDataPrivateRow {
+  id: string;
+  mathnet_problem_id: string;
+  release_id: string;
+  is_eligible: boolean;
+  solutions_markdown: string | null;
+  final_answer: string | null;
+  idea_ids: string[];
+  secondary_idea_ids: string[];
+  mechanism: string | null;
+  evidence: Array<{ snippet: string; source: string }>;
+  evidence_kind: string;
+  confidence: number;
+  /** Stemmed lexical tokens from statement, topics, idea labels and mechanism. */
+  search_terms: string[];
+  statement_embedding: unknown | null;
+  idea_embedding: unknown | null;
+  embedding_model: string | null;
+  embedding_dimension: number | null;
+  profile_version: string | null;
+  created_at: string;
+}
+
+export interface MseLookupCacheRow {
+  cache_key: string;
+  normalized_query: string;
+  api_params: Record<string, string>;
+  response: unknown;
+  outcome: "found" | "no_result" | "unavailable";
+  fetched_at: string;
+  expires_at: string;
 }
 
 export interface MathnetProblemRow {
@@ -275,8 +359,15 @@ export interface MathnetProblemRow {
   problem_type: string | null;
   source_locator: { url?: string; explorer_url?: string; dataset?: string; revision?: string };
   content_hash: string;
+  is_english: boolean;
+  is_text_complete: boolean;
+  has_images: boolean;
+  has_solution: boolean;
+  rights_cleared: boolean;
+  exclusion_reason: string | null;
   is_eligible: boolean;
   attribution: Record<string, unknown>;
+  created_at: string;
 }
 
 export interface RecommendationRunRow {
@@ -286,6 +377,8 @@ export interface RecommendationRunRow {
   statement_version: number;
   notes_revision: number | null;
   profile_hash: string;
+  /** Hash of every cache input: statement version, notes revision, profile, release, index, retrieval version. */
+  cache_key: string;
   trigger: "completion" | "manual";
   release_id: string | null;
   index_version: number;
@@ -309,6 +402,9 @@ export interface RecommendationItemRow {
   saved_problem_id: string | null;
   dismissed_at: string | null;
   relevance_feedback: string | null;
+  /** True once saved or dismissed; refiltered out of every later run. */
+  excluded: boolean;
+  created_at: string;
 }
 
 export interface ExportRow {
@@ -325,4 +421,5 @@ export interface ExportRow {
   error_code: string | null;
   expires_at: string | null;
   created_at: string;
+  updated_at: string;
 }

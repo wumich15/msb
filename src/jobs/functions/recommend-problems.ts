@@ -1,10 +1,13 @@
 import { inngest, EVENT_NAME, type JobEventData } from "@/jobs/client";
 import { claimJob, finishJob, loadProblemContext } from "@/jobs/runtime";
-import { createServiceClient } from "@/lib/db/service";
-import { retrieveRelatedProblems, type RetrievalSource } from "@/lib/mathnet/retrieval";
+import { db, nowIso } from "@/lib/db/admin";
+import { COLLECTIONS, col, newId } from "@/lib/db/collections";
+import { readMany } from "@/lib/db/transactions/shared";
+import { readJob } from "@/lib/db/transactions/jobs";
+import { recommendationCacheKey, retrieveRelatedProblems, type RetrievalSource } from "@/lib/mathnet/retrieval";
 import { reconcileJobUsage } from "@/lib/ai/usage";
 import { versions } from "@/lib/config";
-import type { IdeaProfilePrivateRow } from "@/lib/db/types";
+import type { IdeaProfilePrivateRow, RecommendationItemRow, RecommendationRunRow } from "@/lib/db/types";
 
 /**
  * Finds related MathNET problems for one run.
@@ -21,7 +24,6 @@ export const recommendProblemsFunction = inngest.createFunction(
     const job = await step.run("claim", () => claimJob(jobId));
     if (!job || !problemId) return { skipped: true };
 
-    const supabase = createServiceClient();
     const context = await loadProblemContext(userId, problemId);
     if (!context) {
       await finishJob(jobId, "CANCELLED", { errorCode: "NOT_FOUND" });
@@ -36,13 +38,8 @@ export const recommendProblemsFunction = inngest.createFunction(
     if (dependencyId) {
       let dependencyState: string | null = null;
       for (let attempt = 0; attempt < 10; attempt += 1) {
-        const { data: dependency } = await supabase
-          .from("jobs")
-          .select("run_state")
-          .eq("id", dependencyId)
-          .eq("user_id", userId)
-          .maybeSingle();
-        dependencyState = dependency?.run_state ?? null;
+        const dependency = await readJob(dependencyId);
+        dependencyState = dependency && dependency.user_id === userId ? dependency.run_state : null;
         if (dependencyState === "SUCCEEDED") break;
         if (["FAILED", "CANCELLED", "TIMED_OUT"].includes(dependencyState ?? "")) break;
         await step.sleep(`wait-for-classification-${attempt}`, "3s");
@@ -62,17 +59,7 @@ export const recommendProblemsFunction = inngest.createFunction(
       return { superseded: true };
     }
 
-    const { data: profileRow } = await supabase
-      .from("problem_idea_profiles")
-      .select("*")
-      .eq("problem_id", problemId)
-      .eq("user_id", userId)
-      .eq("statement_version", context.problem.current_statement_version)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    const profile = (profileRow as IdeaProfilePrivateRow | null) ?? null;
+    const profile = await latestProfile(userId, problemId, context.problem.current_statement_version);
 
     const source: RetrievalSource = {
       problemId,
@@ -90,34 +77,31 @@ export const recommendProblemsFunction = inngest.createFunction(
       return { skipped: true };
     }
 
-    const { data: run, error: runError } = await supabase
-      .from("recommendation_runs")
-      .insert({
-        user_id: userId,
-        problem_id: problemId,
-        statement_version: source.statementVersion,
-        notes_revision: context.notes?.revision ?? null,
-        profile_hash: "pending",
-        trigger,
-        retrieval_version: versions.retrieval,
-        state: "RUNNING",
-      })
-      .select("id")
-      .single();
-
-    if (runError || !run) {
-      await finishJob(jobId, "FAILED", { errorCode: "INTERNAL_ERROR", errorDetail: runError?.message });
-      return { failed: true };
-    }
+    const runId = newId();
+    const runRef = col(COLLECTIONS.recommendationRuns).doc(runId);
+    const run: RecommendationRunRow = {
+      id: runId,
+      user_id: userId,
+      problem_id: problemId,
+      statement_version: source.statementVersion,
+      notes_revision: context.notes?.revision ?? null,
+      profile_hash: "pending",
+      cache_key: "pending",
+      trigger,
+      release_id: null,
+      index_version: 0,
+      retrieval_version: versions.retrieval,
+      state: "RUNNING",
+      candidates: [],
+      error_code: null,
+      created_at: nowIso(),
+      completed_at: null,
+    };
+    await runRef.set(run);
 
     try {
       const result = await retrieveRelatedProblems(source);
-      await reconcileJobUsage(
-        jobId,
-        userId,
-        job.reserved_tokens ?? 0,
-        result.usage.inputTokens + result.usage.outputTokens,
-      );
+      await reconcileJobUsage(jobId, result.usage.inputTokens + result.usage.outputTokens);
 
       const fresh = await loadProblemContext(userId, problemId);
       if (
@@ -125,50 +109,58 @@ export const recommendProblemsFunction = inngest.createFunction(
         fresh.problem.current_statement_version !== source.statementVersion ||
         fresh.notes?.revision !== context.notes?.revision
       ) {
-        await supabase
-          .from("recommendation_runs")
-          .update({ state: "FAILED", error_code: "STALE_REQUEST", completed_at: new Date().toISOString() })
-          .eq("id", run.id);
+        await runRef.update({ state: "FAILED", error_code: "STALE_REQUEST", completed_at: nowIso() });
         await finishJob(jobId, "CANCELLED", { errorCode: "STALE_REQUEST" });
         return { superseded: true };
       }
 
-      await supabase
-        .from("recommendation_runs")
-        .update({
-          state: result.state,
-          release_id: result.releaseId,
-          index_version: result.indexVersion,
-          profile_hash: result.profileHash,
-          candidates: result.items,
-          completed_at: new Date().toISOString(),
-        })
-        .eq("id", run.id);
+      const cacheKey = recommendationCacheKey({
+        userId,
+        problemId,
+        statementVersion: source.statementVersion,
+        notesRevision: context.notes?.revision ?? null,
+        profileHash: result.profileHash,
+        releaseId: result.releaseId,
+        indexVersion: result.indexVersion,
+      });
 
-      if (result.items.length > 0) {
-        await supabase.from("recommendation_items").insert(
-          result.items.map((item) => ({
-            run_id: run.id,
-            user_id: userId,
-            mathnet_problem_id: item.mathnetProblemId,
-            rank: item.rank,
-            fusion_score: item.fusionScore,
-            relationship: item.relationship,
-            is_tentative: item.isTentative,
-          })),
-        );
+      const batch = db().batch();
+      batch.update(runRef, {
+        state: result.state,
+        release_id: result.releaseId,
+        index_version: result.indexVersion,
+        profile_hash: result.profileHash,
+        cache_key: cacheKey,
+        candidates: result.items,
+        completed_at: nowIso(),
+      });
+      for (const item of result.items) {
+        const row: RecommendationItemRow = {
+          id: newId(),
+          run_id: runId,
+          user_id: userId,
+          mathnet_problem_id: item.mathnetProblemId,
+          rank: item.rank,
+          fusion_score: item.fusionScore,
+          relationship: item.relationship,
+          is_tentative: item.isTentative,
+          saved_problem_id: null,
+          dismissed_at: null,
+          relevance_feedback: null,
+          excluded: false,
+          created_at: nowIso(),
+        };
+        batch.set(col(COLLECTIONS.recommendationItems).doc(row.id), row);
       }
+      await batch.commit();
 
       await finishJob(jobId, "SUCCEEDED", {
-        result: { run_id: run.id, count: result.items.length, state: result.state },
+        result: { run_id: runId, count: result.items.length, state: result.state },
         providerRequestIds: result.usage.requestIds,
       });
-      return { runId: run.id, count: result.items.length };
+      return { runId, count: result.items.length };
     } catch (error) {
-      await supabase
-        .from("recommendation_runs")
-        .update({ state: "FAILED", error_code: "UPSTREAM_UNAVAILABLE", completed_at: new Date().toISOString() })
-        .eq("id", run.id);
+      await runRef.update({ state: "FAILED", error_code: "UPSTREAM_UNAVAILABLE", completed_at: nowIso() }).catch(() => undefined);
       await finishJob(jobId, "FAILED", {
         errorCode: "UPSTREAM_UNAVAILABLE",
         errorDetail: error instanceof Error ? error.message : "retrieval failed",
@@ -177,3 +169,15 @@ export const recommendProblemsFunction = inngest.createFunction(
     }
   },
 );
+
+export async function latestProfile(userId: string, problemId: string, statementVersion: number): Promise<IdeaProfilePrivateRow | null> {
+  const rows = await readMany<IdeaProfilePrivateRow>(
+    col(COLLECTIONS.ideaProfiles)
+      .where("user_id", "==", userId)
+      .where("problem_id", "==", problemId)
+      .where("statement_version", "==", statementVersion)
+      .orderBy("created_at", "desc")
+      .limit(1),
+  );
+  return rows[0] ?? null;
+}
