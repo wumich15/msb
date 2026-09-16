@@ -7,6 +7,7 @@ import { api, ApiError } from "@/lib/api-client";
 import { clearAllRecoveryDrafts, clearRecoveryDraft, readRecoveryDraft, saveRecoveryDraft } from "@/lib/drafts";
 import { SAVE_STATE_LABELS, useAutosave } from "@/hooks/useAutosave";
 import { useJobPolling, type JobStatus } from "@/hooks/useJobPolling";
+import { NARROW_LAYOUT_QUERY, useMediaQuery } from "@/hooks/useMediaQuery";
 
 type Panel = "projects" | "notes" | "assistant";
 type ProblemStatus = "not_started" | "in_progress" | "complete";
@@ -160,6 +161,8 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
   const [automaticRecommendations, setAutomaticRecommendations] = useState(true);
   const notesRef = useRef<HTMLTextAreaElement | null>(null);
   const recovered = useRef(new Set<string>());
+  // Wide screens show all three panels at once; only the tab layout hides them.
+  const tabbedLayout = useMediaQuery(NARROW_LAYOUT_QUERY);
 
   const saveStatement = useCallback(async (value: string, expectedVersion: number) => {
     if (!problemId) return expectedVersion;
@@ -346,9 +349,18 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
     [folderId, problems, statusFilter],
   );
 
+  const selectedFolder = useMemo(() => folders.find((folder) => folder.id === folderId) ?? null, [folderId, folders]);
+
+  const problemCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const problem of problems) counts.set(problem.folderId, (counts.get(problem.folderId) ?? 0) + 1);
+    return counts;
+  }, [problems]);
+
   async function createFolder(event: React.FormEvent) {
     event.preventDefault();
     if (!newFolderName.trim() || !(await flushEditors())) return;
+    setNotice(null);
     try {
       const result = await api<{ folder: Folder }>("/api/folders", { method: "POST", json: { name: newFolderName } });
       setFolders((current) => [...current, result.folder]);
@@ -391,6 +403,7 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
   async function createProblem(event: React.FormEvent) {
     event.preventDefault();
     if (!folderId || !newProblemTitle.trim() || !(await flushEditors())) return;
+    setNotice(null);
     try {
       const result = await api<{ problem: ProblemSummary }>("/api/problems", {
         method: "POST",
@@ -398,7 +411,11 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
       });
       setProblems((current) => [result.problem, ...current]);
       setNewProblemTitle("");
+      setRecommendations([]);
+      setRecommendationState(null);
       await loadProblem(result.problem.id);
+      // On the tab layout the new problem's editor is a different tab.
+      setPanel("notes");
     } catch (error) {
       setNotice(errorMessage(error));
     }
@@ -641,18 +658,20 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
       </nav>
 
       <main className="workspace" data-assistant-collapsed={assistantCollapsed}>
-        <aside className="panel panel-projects" hidden={panel !== "projects"} aria-label="Math projects">
+        <aside className="panel panel-projects" hidden={tabbedLayout && panel !== "projects"} aria-label="Math projects">
           <h2>Math projects</h2>
           <form onSubmit={createFolder} className="compact-form">
             <label htmlFor="new-folder">New project</label>
-            <input id="new-folder" value={newFolderName} onChange={(event) => setNewFolderName(event.target.value)} maxLength={120} />
-            <button type="submit">Add</button>
+            <input id="new-folder" value={newFolderName} onChange={(event) => setNewFolderName(event.target.value)} maxLength={120} placeholder="Olympiad algebra" />
+            <button type="submit" disabled={!newFolderName.trim()}>Add project</button>
           </form>
           {folders.length === 0 ? <p className="empty-state">Create a project to begin.</p> : (
             <ul className="tree-list">
               {folders.map((folder) => (
                 <li key={folder.id}>
-                  <button className="row-button" type="button" aria-current={folder.id === folderId} onClick={() => setFolderId(folder.id)}>{folder.name}</button>
+                  <button className="row-button" type="button" aria-current={folder.id === folderId} onClick={() => setFolderId(folder.id)}>
+                    {folder.name} <span className="row-count" aria-label={`${problemCounts.get(folder.id) ?? 0} problems`}>{problemCounts.get(folder.id) ?? 0}</span>
+                  </button>
                 </li>
               ))}
             </ul>
@@ -660,27 +679,32 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
           {folderId ? <div className="button-row"><button type="button" onClick={() => void renameFolder()}>Rename</button><button type="button" onClick={() => void deleteFolder()}>Delete</button></div> : null}
           <hr />
           <form onSubmit={createProblem} className="compact-form">
-            <label htmlFor="new-problem">New problem</label>
-            <input id="new-problem" value={newProblemTitle} onChange={(event) => setNewProblemTitle(event.target.value)} maxLength={300} disabled={!folderId} />
-            <button type="submit" disabled={!folderId}>Add</button>
+            <label htmlFor="new-problem">{selectedFolder ? `New problem in ${selectedFolder.name}` : "New problem"}</label>
+            <input id="new-problem" value={newProblemTitle} onChange={(event) => setNewProblemTitle(event.target.value)} maxLength={300} disabled={!folderId} placeholder="Problem title" />
+            <button type="submit" disabled={!folderId || !newProblemTitle.trim()}>Add problem</button>
           </form>
+          {folderId ? <p className="scope-note">The problem opens empty — paste its statement in the notes panel.</p> : <p className="scope-note">Choose or create a project first; every problem lives in one.</p>}
           <label htmlFor="status-filter">Show</label>{" "}
           <select id="status-filter" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}>
             <option value="all">All statuses</option>
             {Object.entries(STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select>
-          <ul className="problem-list">
-            {filteredProblems.map((problem) => (
-              <li key={problem.id}>
-                <button className="row-button" type="button" aria-current={problem.id === problemId} onClick={() => void selectProblem(problem.id)}>
-                  <span className="status-badge" data-status={problem.status}>{STATUS_LABELS[problem.status]}</span><br />{problem.title}
-                </button>
-              </li>
-            ))}
-          </ul>
+          {filteredProblems.length === 0 ? (
+            <p className="empty-state">{problems.length === 0 ? "No problems yet. Add one above." : "No problems match this project and status."}</p>
+          ) : (
+            <ul className="problem-list">
+              {filteredProblems.map((problem) => (
+                <li key={problem.id}>
+                  <button className="row-button" type="button" aria-current={problem.id === problemId} onClick={() => void selectProblem(problem.id)}>
+                    <span className="status-badge" data-status={problem.status}>{STATUS_LABELS[problem.status]}</span><br />{problem.title}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </aside>
 
-        <section className="panel panel-editor" hidden={panel !== "notes"} aria-label="Problem and notes">
+        <section className="panel panel-editor" hidden={tabbedLayout && panel !== "notes"} aria-label="Problem and notes">
           {!detail ? <div className="empty-state"><h2>No problem selected</h2><p>Create a project and problem, then paste a typed, English, text-complete statement. Handwriting, OCR, diagrams, and file uploads are outside this MVP.</p></div> : (
             <>
               <div className="problem-heading">
@@ -767,7 +791,7 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
           )}
         </section>
 
-        <aside className="panel panel-assistant" hidden={panel !== "assistant"} aria-label="AI assistant">
+        <aside className="panel panel-assistant" hidden={tabbedLayout && panel !== "assistant"} aria-label="AI assistant">
           <div className="section-heading">
             <h2>AI assistant</h2>
             <button type="button" aria-label={assistantCollapsed ? "Expand assistant" : "Collapse assistant"} onClick={() => setAssistantCollapsed((value) => !value)}>{assistantCollapsed ? "+" : "−"}</button>

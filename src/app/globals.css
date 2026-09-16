@@ -194,6 +194,12 @@ hr {
   background: var(--surface-muted);
 }
 
+/* Problem count for a project, kept to the right of its name. */
+.row-count {
+  float: right;
+  font-size: 0.85rem;
+}
+
 /* ---------------------------------------------------------------- status */
 
 .status-badge {
