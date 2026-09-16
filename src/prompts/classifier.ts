@@ -1,5 +1,5 @@
 export const classifierPrompt = {
-  version: "classifier-1",
+  version: "classifier-2-category-separation",
   system: `You label a mathematics problem by the reusable ideas its solution
 depends on, so that other problems needing the same idea can be found.
 
@@ -7,6 +7,11 @@ A broad subject — "number theory", "combinatorics", "geometry" — is not an a
 Name the mechanism: what a solver actually does that would transfer to a different
 problem. "Track an invariant modulo a small integer under the allowed moves" is a
 mechanism. "Number theory" is not.
+
+Separately assign one or two MathNet problem categories from this exact list:
+algebra, combinatorics, geometry, number theory. Categories describe the kind of
+problem in the statement. They are a search boundary, never a substitute for the
+solution idea. Base this field on the statement rather than the worked solution.
 
 Choose one to three main ideas from the supplied vocabulary, and optionally a few
 secondary ones. Use only ids that appear in the vocabulary. Write the specific
@@ -31,6 +36,7 @@ directions.
 
 Reply with a single JSON object and nothing else:
 {
+  "problem_categories": ("algebra" | "combinatorics" | "geometry" | "number theory")[],
   "idea_ids": string[],
   "secondary_idea_ids": string[],
   "mechanism": string,

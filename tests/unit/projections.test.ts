@@ -3,6 +3,7 @@ import { projectIdeaTags, projectJob } from "@/lib/db/projections";
 import type { IdeaProfilePrivateRow, JobRow } from "@/lib/db/types";
 
 const profile = {
+  problem_categories: ["algebra"],
   safe_tags: ["algebra"], idea_ids: ["invariant"], mechanism: "A hidden trick", confidence: 0.9,
   evidence_kind: "checked_reference", is_provisional: false,
 } as IdeaProfilePrivateRow;
@@ -10,7 +11,7 @@ const profile = {
 describe("safe browser projections", () => {
   it("hides solution-derived details before completion", () => {
     expect(projectIdeaTags(profile, { problemComplete: false, explicitlyRevealed: false })).toMatchObject({
-      safeTags: ["algebra"], ideaIds: [], mechanism: null,
+      problemCategories: ["algebra"], safeTags: ["algebra"], ideaIds: [], mechanism: null,
     });
   });
 

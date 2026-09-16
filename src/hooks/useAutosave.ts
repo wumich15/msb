@@ -39,9 +39,10 @@ export function useAutosave(options: AutosaveOptions) {
 
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pending = useRef<string | null>(null);
-  const inFlight = useRef(false);
+  const inFlight = useRef<Promise<void> | null>(null);
   const revisionRef = useRef(options.initialRevision);
   const saveRef = useRef(options.save);
+  const loadedProblemId = useRef(options.problemId);
 
   useEffect(() => {
     saveRef.current = options.save;
@@ -49,6 +50,10 @@ export function useAutosave(options: AutosaveOptions) {
 
   useEffect(() => {
     // Switching problems resets the field to that problem's saved content.
+    // A successful save also changes initialRevision; that is not a switch and
+    // must not wipe a newer draft that was typed while the request was running.
+    if (loadedProblemId.current === options.problemId) return;
+    loadedProblemId.current = options.problemId;
     setValue(options.initialValue);
     setRevision(options.initialRevision);
     revisionRef.current = options.initialRevision;
@@ -58,35 +63,48 @@ export function useAutosave(options: AutosaveOptions) {
   }, [options.problemId, options.initialValue, options.initialRevision]);
 
   const persist = useCallback(async () => {
-    const next = pending.current;
-    if (next === null || inFlight.current) return;
+    // Drain saves in order. A response for an older draft must never clear text
+    // entered while that request was in flight.
+    while (pending.current !== null) {
+      while (inFlight.current) await inFlight.current;
+      const next = pending.current;
+      if (next === null) return;
 
-    inFlight.current = true;
-    setState("saving");
-    try {
-      const newRevision = await saveRef.current(next, revisionRef.current);
-      revisionRef.current = newRevision;
-      setRevision(newRevision);
-      pending.current = null;
-      setState("saved");
-      clearRecoveryDraft(options.userId, options.problemId, options.field);
-    } catch (error) {
-      if (error instanceof ApiError && (error.code === "NOTES_CONFLICT" || error.code === "STATEMENT_CONFLICT")) {
-        const current = Number(error.detail);
-        setConflictRevision(Number.isFinite(current) ? current : null);
-        setState("conflict");
-      } else {
-        setState("failed");
-      }
-      // The draft survives either way.
-      saveRecoveryDraft(options.userId, options.problemId, {
-        field: options.field,
-        value: next,
-        baseRevision: revisionRef.current,
-        savedAt: Date.now(),
-      });
-    } finally {
-      inFlight.current = false;
+      let failed = false;
+      const request = (async () => {
+        setState("saving");
+        try {
+          const newRevision = await saveRef.current(next, revisionRef.current);
+          revisionRef.current = newRevision;
+          setRevision(newRevision);
+          if (pending.current === next) {
+            pending.current = null;
+            setState("saved");
+            clearRecoveryDraft(options.userId, options.problemId, options.field);
+          } else {
+            setState("unsaved");
+          }
+        } catch (error) {
+          failed = true;
+          if (error instanceof ApiError && (error.code === "NOTES_CONFLICT" || error.code === "STATEMENT_CONFLICT")) {
+            const current = Number(error.detail);
+            setConflictRevision(Number.isFinite(current) ? current : null);
+            setState("conflict");
+          } else {
+            setState("failed");
+          }
+          saveRecoveryDraft(options.userId, options.problemId, {
+            field: options.field,
+            value: pending.current ?? next,
+            baseRevision: revisionRef.current,
+            savedAt: Date.now(),
+          });
+        }
+      })();
+      inFlight.current = request;
+      await request;
+      if (inFlight.current === request) inFlight.current = null;
+      if (failed) return;
     }
   }, [options.field, options.problemId, options.userId]);
 
@@ -117,7 +135,8 @@ export function useAutosave(options: AutosaveOptions) {
     setConflictRevision(null);
     setState("unsaved");
     pending.current = value;
-  }, [conflictRevision, value]);
+    void persist();
+  }, [conflictRevision, persist, value]);
 
   useEffect(() => {
     return () => {

@@ -1,0 +1,3 @@
+# Workspace Editor parameters.
+# Intentionally empty: save limits and debounce timing are owned by central server
+# validation/config, while textarea sizing is presentation behavior in CSS.

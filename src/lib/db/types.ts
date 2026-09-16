@@ -31,7 +31,7 @@ export type ReferenceState =
   | "SUPERSEDED"
   | "CANCELLED";
 
-export type ReferenceProvenance = "user_supplied" | "math_stack_exchange" | "ai_generated";
+export type ReferenceProvenance = "user_supplied" | "math_overflow" | "math_stack_exchange" | "ai_generated";
 
 export type TutorResponseMode =
   | "default"
@@ -246,6 +246,7 @@ export interface IdeaProfilePrivateRow {
   problem_id: string;
   statement_version: number;
   notes_revision: number | null;
+  problem_categories: string[];
   idea_ids: string[];
   secondary_idea_ids: string[];
   mechanism: string | null;
@@ -320,6 +321,7 @@ export interface MathnetSolutionDataPrivateRow {
   is_eligible: boolean;
   solutions_markdown: string | null;
   final_answer: string | null;
+  problem_categories: string[];
   idea_ids: string[];
   secondary_idea_ids: string[];
   mechanism: string | null;
@@ -356,6 +358,7 @@ export interface MathnetProblemRow {
   country: string | null;
   competition: string | null;
   topics: string[];
+  topic_roots: string[];
   problem_type: string | null;
   source_locator: { url?: string; explorer_url?: string; dataset?: string; revision?: string };
   content_hash: string;

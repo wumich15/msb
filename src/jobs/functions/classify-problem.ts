@@ -5,9 +5,11 @@ import { nowIso } from "@/lib/db/admin";
 import { readOne } from "@/lib/db/transactions/shared";
 import { latestReadyReference } from "@/lib/ai/reference-store";
 import { classifyProblem, classificationInputHash, safeTagsFrom, type EvidenceKind } from "@/lib/mathnet/classify";
-import { reconcileJobUsage } from "@/lib/ai/usage";
+import { reconcileJobUsage, reserveExistingJobBudget, TOKEN_ESTIMATES } from "@/lib/ai/usage";
 import { versions } from "@/lib/config";
 import { classifierPrompt } from "@/prompts";
+import { cancelJob, enqueueJob } from "@/lib/db/transactions/jobs";
+import { dispatchJobById } from "@/jobs/dispatch";
 import type { IdeaProfilePrivateRow, ProfileRow } from "@/lib/db/types";
 
 /**
@@ -31,7 +33,7 @@ export const classifyProblemFunction = inngest.createFunction(
       return { skipped: true };
     }
 
-    const manual = job.input.reason === "manual";
+    const manual = job.input.reason === "manual" || job.input.recommend_after === true;
     const profile = await readOne<ProfileRow>(col(COLLECTIONS.profiles).doc(userId));
 
     // A manual request is an explicit request for AI processing; automatic runs
@@ -73,6 +75,7 @@ export const classifyProblemFunction = inngest.createFunction(
     const cached = await readOne<IdeaProfilePrivateRow>(col(COLLECTIONS.ideaProfiles).doc(cacheId));
 
     if (cached) {
+      await enqueueRecommendationAfterResearch(job, userId, problemId, context.problem.current_statement_version, context.notes?.revision ?? null);
       await finishJob(jobId, "SUCCEEDED", { result: { cached: true, profile_id: cached.id } });
       return { cached: true };
     }
@@ -111,6 +114,7 @@ export const classifyProblemFunction = inngest.createFunction(
       problem_id: problemId,
       statement_version: context.problem.current_statement_version,
       notes_revision: context.notes?.revision ?? null,
+      problem_categories: result.profile.problem_categories,
       idea_ids: result.profile.idea_ids,
       secondary_idea_ids: result.profile.secondary_idea_ids,
       mechanism: result.profile.mechanism,
@@ -134,6 +138,7 @@ export const classifyProblemFunction = inngest.createFunction(
       return { failed: true };
     }
 
+    await enqueueRecommendationAfterResearch(job, userId, problemId, context.problem.current_statement_version, context.notes?.revision ?? null);
     await finishJob(jobId, "SUCCEEDED", {
       result: { profile_id: profileId, evidence_kind: evidenceKind },
       providerRequestIds: result.usage.requestIds,
@@ -141,3 +146,27 @@ export const classifyProblemFunction = inngest.createFunction(
     return { classified: true };
   },
 );
+
+async function enqueueRecommendationAfterResearch(
+  job: { id: string; input: Record<string, unknown> },
+  userId: string,
+  problemId: string,
+  statementVersion: number,
+  notesRevision: number | null,
+): Promise<void> {
+  if (job.input.recommend_after !== true) return;
+  const recommendationId = await enqueueJob({
+    userId,
+    jobType: "recommend-problems",
+    problemId,
+    input: { trigger: "manual", research_source_job_id: job.id },
+    idempotencyKey: `recommend:research:${job.id}`,
+    statementVersion,
+    notesRevision,
+  });
+  if (await reserveExistingJobBudget(recommendationId, TOKEN_ESTIMATES["recommend-problems"]).catch(() => false)) {
+    await dispatchJobById(recommendationId);
+  } else {
+    await cancelJob(recommendationId, "AI_LIMIT_REACHED");
+  }
+}

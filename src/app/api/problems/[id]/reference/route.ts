@@ -37,6 +37,7 @@ export const POST = route(async (request: Request, { params }: Params) => {
       body.choice,
       body.expectedStatementVersion,
       body.choice === "provide" ? (body.workedSolution ?? null) : null,
+      body.researchRelated,
     );
   } catch (error) {
     await releaseBudgetReservation(userId, reservation);

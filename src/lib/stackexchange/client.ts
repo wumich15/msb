@@ -8,7 +8,7 @@ import { licenseForPost } from "./license";
 import { postBodyToText } from "./html";
 
 /**
- * Math Stack Exchange lookup.
+ * MathOverflow / Math Stack Exchange lookup.
  *
  * Only problem-statement search terms leave this application: no notes, no
  * conversation, no folder names, no account identity. Responses are cached by
@@ -16,7 +16,7 @@ import { postBodyToText } from "./html";
  */
 
 const API_ROOT = "https://api.stackexchange.com/2.3";
-const SITE = "math";
+const SITES = ["mathoverflow.net", "math"] as const;
 /** The built-in filter that includes question and answer bodies. */
 const BODY_FILTER = "withbody";
 
@@ -30,6 +30,7 @@ export interface MseAnswer {
   license: string;
   url: string;
   revisionLink: string;
+  site: (typeof SITES)[number];
 }
 
 export interface MseQuestion {
@@ -41,6 +42,7 @@ export interface MseQuestion {
   author: string | null;
   isAnswered: boolean;
   score: number;
+  site: (typeof SITES)[number];
 }
 
 export type LookupOutcome =
@@ -103,7 +105,7 @@ interface ApiWrapper<T> {
   error_message?: string;
 }
 
-async function apiGet<T>(path: string, params: Record<string, string>, signal?: AbortSignal): Promise<ApiWrapper<T>> {
+async function apiGet<T>(path: string, params: Record<string, string>, site: (typeof SITES)[number], signal?: AbortSignal): Promise<ApiWrapper<T>> {
   if (Date.now() < backoffUntil) {
     throw new AppError("RATE_LIMITED", "search backoff in effect");
   }
@@ -111,7 +113,7 @@ async function apiGet<T>(path: string, params: Record<string, string>, signal?: 
   const config = stackExchangeConfig();
   const url = new URL(`${API_ROOT}${path}`);
   for (const [name, value] of Object.entries(params)) url.searchParams.set(name, value);
-  url.searchParams.set("site", SITE);
+  url.searchParams.set("site", site);
   if (config.key) url.searchParams.set("key", config.key);
 
   const response = await fetch(url, { signal, headers: { accept: "application/json" } });
@@ -165,7 +167,7 @@ export async function lookupSolutions(queries: string[], signal?: AbortSignal): 
   if (bounded.length === 0) return { kind: "no_result", fromCache: false };
 
   const params = { sort: "relevance", order: "desc", pagesize: String(limits.maxMseQuestions), filter: BODY_FILTER };
-  const key = cacheKey(bounded, params);
+  const key = cacheKey(bounded, { ...params, sites: SITES.join(",") });
 
   const cached = await readCache(key);
   if (cached) {
@@ -177,29 +179,35 @@ export async function lookupSolutions(queries: string[], signal?: AbortSignal): 
 
   const questions: MseQuestion[] = [];
   try {
-    for (const query of bounded) {
-      const result = await apiGet<RawQuestion>("/search/advanced", { ...params, q: query }, signal);
-      for (const item of result.items ?? []) {
-        if (questions.some((existing) => existing.questionId === item.question_id)) continue;
-        if (item.answer_count === 0) continue;
-        questions.push({
-          questionId: item.question_id,
-          title: item.title,
-          bodyText: postBodyToText(item.body ?? ""),
-          url: item.link,
-          license: licenseForPost(item),
-          author: item.owner?.display_name ?? null,
-          isAnswered: item.is_answered,
-          score: item.score,
-        });
+    for (const site of SITES) {
+      let siteQuestions = 0;
+      for (const query of bounded) {
+        const result = await apiGet<RawQuestion>("/search/advanced", { ...params, q: query }, site, signal);
+        for (const item of result.items ?? []) {
+          if (questions.some((existing) => existing.questionId === item.question_id && existing.site === site)) continue;
+          if (item.answer_count === 0) continue;
+          questions.push({
+            questionId: item.question_id,
+            title: item.title,
+            bodyText: postBodyToText(item.body ?? ""),
+            url: item.link,
+            license: licenseForPost(item),
+            author: item.owner?.display_name ?? null,
+            isAnswered: item.is_answered,
+            score: item.score,
+            site,
+          });
+          siteQuestions += 1;
+          if (siteQuestions >= limits.maxMseQuestions) break;
+        }
+        if (siteQuestions >= limits.maxMseQuestions) break;
       }
-      if (questions.length >= limits.maxMseQuestions) break;
     }
   } catch (error) {
     return { kind: "unavailable", reason: error instanceof AppError ? error.detail ?? error.code : "search failed" };
   }
 
-  const inspected = questions.slice(0, limits.maxMseQuestions);
+  const inspected = questions;
   if (inspected.length === 0) {
     await writeCache(key, bounded.join(" | "), params, "no_result", { questions: [], answers: [] });
     return { kind: "no_result", fromCache: false };
@@ -207,36 +215,46 @@ export async function lookupSolutions(queries: string[], signal?: AbortSignal): 
 
   let answers: MseAnswer[] = [];
   try {
-    const ids = inspected.map((question) => question.questionId).join(";");
-    const result = await apiGet<RawAnswer>(
-      `/questions/${ids}/answers`,
-      { sort: "votes", order: "desc", pagesize: String(limits.maxMseQuestions * limits.maxMseAnswersPerQuestion), filter: BODY_FILTER },
-      signal,
-    );
-
-    const perQuestion = new Map<number, number>();
-    for (const item of result.items ?? []) {
-      const seen = perQuestion.get(item.question_id) ?? 0;
-      if (seen >= limits.maxMseAnswersPerQuestion) continue;
-      perQuestion.set(item.question_id, seen + 1);
-      answers.push({
-        answerId: item.answer_id,
-        questionId: item.question_id,
-        score: item.score,
-        isAccepted: item.is_accepted,
-        bodyText: postBodyToText(item.body ?? ""),
-        author: item.owner?.display_name ?? null,
-        license: licenseForPost(item),
-        url: `https://math.stackexchange.com/a/${item.answer_id}`,
-        revisionLink: `https://math.stackexchange.com/posts/${item.answer_id}/revisions`,
-      });
+    const perQuestion = new Map<string, number>();
+    for (const site of SITES) {
+      const ids = inspected.filter((question) => question.site === site).map((question) => question.questionId).join(";");
+      if (!ids) continue;
+      const result = await apiGet<RawAnswer>(
+        `/questions/${ids}/answers`,
+        { sort: "votes", order: "desc", pagesize: String(limits.maxMseQuestions * limits.maxMseAnswersPerQuestion), filter: BODY_FILTER },
+        site,
+        signal,
+      );
+      const origin = site === "mathoverflow.net" ? "https://mathoverflow.net" : "https://math.stackexchange.com";
+      for (const item of result.items ?? []) {
+        const questionKey = `${site}:${item.question_id}`;
+        const seen = perQuestion.get(questionKey) ?? 0;
+        if (seen >= limits.maxMseAnswersPerQuestion) continue;
+        perQuestion.set(questionKey, seen + 1);
+        answers.push({
+          answerId: item.answer_id,
+          questionId: item.question_id,
+          score: item.score,
+          isAccepted: item.is_accepted,
+          bodyText: postBodyToText(item.body ?? ""),
+          author: item.owner?.display_name ?? null,
+          license: licenseForPost(item),
+          url: `${origin}/a/${item.answer_id}`,
+          revisionLink: `${origin}/posts/${item.answer_id}/revisions`,
+          site,
+        });
+      }
     }
   } catch (error) {
     return { kind: "unavailable", reason: error instanceof AppError ? error.detail ?? error.code : "answer fetch failed" };
   }
 
   // An accepted or highly scored answer is a starting point, not evidence.
-  answers = answers.sort((a, b) => Number(b.isAccepted) - Number(a.isAccepted) || b.score - a.score);
+  answers = answers.sort((a, b) =>
+    SITES.indexOf(a.site) - SITES.indexOf(b.site) ||
+    Number(b.isAccepted) - Number(a.isAccepted) ||
+    b.score - a.score,
+  );
 
   if (answers.length === 0) {
     await writeCache(key, bounded.join(" | "), params, "no_result", { questions: inspected, answers: [] });

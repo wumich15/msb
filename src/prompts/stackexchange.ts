@@ -1,6 +1,6 @@
 export const searchQueryPrompt = {
   version: "search-queries-1",
-  system: `You write search queries for Math Stack Exchange from a problem
+  system: `You write search queries for MathOverflow and Math Stack Exchange from a problem
 statement.
 
 Produce at most three queries. Preserve the constraints and formulas that make this

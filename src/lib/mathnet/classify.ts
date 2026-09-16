@@ -107,7 +107,13 @@ export function normalizeProfile(profile: IdeaProfileSchema, evidenceKind: Evide
     ? Math.min(profile.confidence, 0.25)
     : Math.min(profile.confidence, ceiling);
 
-  return { ...profile, idea_ids: resolved, secondary_idea_ids, confidence };
+  return {
+    ...profile,
+    problem_categories: [...new Set(profile.problem_categories)].slice(0, 2),
+    idea_ids: resolved,
+    secondary_idea_ids,
+    confidence,
+  };
 }
 
 /**

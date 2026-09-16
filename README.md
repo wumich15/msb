@@ -73,9 +73,10 @@ moving dataset revision.
    server-only `mathnet_solution_data` collection, and creates 100–300 eligible
    development fixtures when available.
 4. Set pinned OpenAI/Voyage model IDs and run `npm run mathnet:index`. The index
-   builder classifies and embeds every eligible record, writes lexical terms and
-   Firestore vector values, and activates the release atomically only if all
-   eligible rows validate.
+   builder classifies and embeds every eligible record, reuses matching profiles
+   from `data/mathnet_ideas.json`, writes newly learned solution ideas back to
+   that cache, writes lexical terms and Firestore vector values, and activates
+   the release atomically only if all eligible rows validate.
 
 Changing the embedding model or dimension requires a new `firestore.indexes.json`
 vector dimension and a complete index rebuild. Against the emulator, set

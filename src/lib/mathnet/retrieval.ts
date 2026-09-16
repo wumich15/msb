@@ -9,6 +9,7 @@ import { rerankResultSchema } from "@/lib/ai/schemas";
 import { rerankerPrompt } from "@/prompts";
 import { ideaLabel, ideasToText } from "@/lib/mathnet/taxonomy";
 import { lexicalScore, queryTerms } from "@/lib/mathnet/lexical";
+import { sharesMathnetCategory } from "@/lib/mathnet/categories";
 import { mathnetExclusionsForUser, readActiveRelease } from "@/lib/db/transactions/mathnet";
 import type { MathnetProblemRow, MathnetSolutionDataPrivateRow } from "@/lib/db/types";
 
@@ -26,6 +27,8 @@ export interface RetrievalSource {
   userId: string;
   statement: string;
   statementVersion: number;
+  /** MathNet topic roots inferred from the statement, not from a solution. */
+  problemCategories: string[];
   ideaIds: string[];
   mechanism: string | null;
   /** False when the profile rests on the statement alone. */
@@ -58,6 +61,7 @@ export function profileHashFor(source: RetrievalSource): string {
     .update(
       JSON.stringify({
         statement: source.statement,
+        categories: [...source.problemCategories].sort(),
         ideas: [...source.ideaIds].sort(),
         mechanism: source.mechanism ?? "",
         retrieval: versions.retrieval,
@@ -249,17 +253,30 @@ export async function retrieveRelatedProblems(source: RetrievalSource): Promise<
     return { state: "NO_MATCH", items: [], releaseId: release.id, indexVersion: release.index_version, profileHash, usage };
   }
 
-  const shortlist = fused.slice(0, limits.rerankCandidates);
+  // Category is a boundary, not evidence of a shared trick. Restrict the pool by
+  // statement topic before the idea-level reranker sees any candidates.
+  const candidateDocs = await col(COLLECTIONS.mathnetProblems).firestore.getAll(
+    ...fused.map((candidate) => col(COLLECTIONS.mathnetProblems).doc(candidate.mathnetProblemId)),
+  );
+  const candidateProblems = new Map<string, MathnetProblemRow>();
+  for (const doc of candidateDocs) {
+    if (doc.exists) candidateProblems.set(doc.id, { ...(doc.data() as MathnetProblemRow), id: doc.id });
+  }
+  const shortlist = fused
+    .filter((candidate) => {
+      const problem = candidateProblems.get(candidate.mathnetProblemId);
+      return problem ? sharesMathnetCategory(problem.topics ?? [], source.problemCategories) : false;
+    })
+    .slice(0, limits.rerankCandidates);
+  if (shortlist.length === 0) {
+    return { state: "NO_MATCH", items: [], releaseId: release.id, indexVersion: release.index_version, profileHash, usage };
+  }
   const shortlistIds = shortlist.map((candidate) => candidate.mathnetProblemId);
-  const [problemDocs, profileDocs] = await Promise.all([
-    col(COLLECTIONS.mathnetProblems).firestore.getAll(...shortlistIds.map((id) => col(COLLECTIONS.mathnetProblems).doc(id))),
-    col(COLLECTIONS.mathnetSolutionData).firestore.getAll(
+  const profileDocs = await col(COLLECTIONS.mathnetSolutionData).firestore.getAll(
       ...shortlistIds.map((id) => col(COLLECTIONS.mathnetSolutionData).doc(id)),
       { fieldMask: ["idea_ids", "mechanism", "confidence"] },
-    ),
-  ]);
-  const problems = new Map<string, MathnetProblemRow>();
-  for (const doc of problemDocs) if (doc.exists) problems.set(doc.id, { ...(doc.data() as MathnetProblemRow), id: doc.id });
+    );
+  const problems = candidateProblems;
   // Compact candidate profiles: solution text never enters this prompt.
   const profiles = new Map<string, Pick<SolutionRow, "idea_ids" | "mechanism" | "confidence">>();
   for (const doc of profileDocs) if (doc.exists) profiles.set(doc.id, doc.data() as SolutionRow);

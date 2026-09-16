@@ -201,6 +201,8 @@ export function projectRecommendation(
 }
 
 export interface SafeIdeaTags {
+  /** Statement-level MathNet categories; not a solution hint. */
+  problemCategories: string[];
   /** Drawn from the learner's own notes; safe before completion. */
   safeTags: string[];
   /** Full summary, shown only once the problem is complete. */
@@ -223,6 +225,7 @@ export function projectIdeaTags(
   const reveal = options.problemComplete || options.explicitlyRevealed;
   if (!reveal) {
     return {
+      problemCategories: row.problem_categories ?? [],
       safeTags: row.safe_tags,
       ideaIds: [],
       mechanism: null,
@@ -232,6 +235,7 @@ export function projectIdeaTags(
     };
   }
   return {
+    problemCategories: row.problem_categories ?? [],
     safeTags: row.safe_tags,
     ideaIds: row.idea_ids,
     mechanism: row.mechanism,

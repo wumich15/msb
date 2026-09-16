@@ -107,6 +107,6 @@ export const limits = {
 
 export const versions = {
   retrieval: "retrieval-2-firestore",
-  classifier: "classifier-1",
+  classifier: "classifier-2",
   exportSchema: "msb-export-1",
 } as const;

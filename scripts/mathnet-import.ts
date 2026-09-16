@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { checksum, loadSourceRows, normalizeRow } from "./mathnet-common.js";
 import { adminFirestore, mathnetProblemId, releaseId } from "./firebase-admin.js";
 import { documentTerms } from "../src/lib/mathnet/lexical.js";
+import { mathnetCategoryRoots } from "../src/lib/mathnet/categories.js";
 
 /**
  * Imports a pinned MathNET export into Firestore as an inactive release.
@@ -81,6 +82,7 @@ for (let offset = 0; offset < rows.length; offset += 200) {
       country: row.country,
       competition: row.competition,
       topics: row.topics,
+      topic_roots: mathnetCategoryRoots(row.topics),
       problem_type: row.problemType,
       source_locator: { url: row.sourceUrl, dataset: datasetId, revision },
       content_hash: row.contentHash,
@@ -104,6 +106,7 @@ for (let offset = 0; offset < rows.length; offset += 200) {
           is_eligible: row.exclusionReason === null,
           solutions_markdown: row.solution,
           final_answer: row.finalAnswer,
+          problem_categories: mathnetCategoryRoots(row.topics),
           idea_ids: [],
           secondary_idea_ids: [],
           mechanism: null,
@@ -137,4 +140,3 @@ await writeFile(
   `${JSON.stringify(eligible.slice(0, fixtureLimit).map(({ raw: _raw, ...row }) => row), null, 2)}\n`,
 );
 console.log(JSON.stringify({ releaseId: release, ...manifest }, null, 2));
-

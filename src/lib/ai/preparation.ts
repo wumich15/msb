@@ -33,7 +33,7 @@ export interface PreparationUsage {
 
 export interface PreparationCandidate {
   artifact: ReferenceArtifactSchema;
-  provenance: "user_supplied" | "math_stack_exchange" | "ai_generated";
+  provenance: "user_supplied" | "math_overflow" | "math_stack_exchange" | "ai_generated";
   sources: SourceCredit[];
   attribution: Record<string, unknown>;
 }
@@ -211,7 +211,7 @@ export async function findCandidateOnStackExchange(
 
   for (const answer of lookup.answers) {
     budget.assertTimeLeft("comparing a retrieved answer");
-    const question = lookup.questions.find((item) => item.questionId === answer.questionId);
+    const question = lookup.questions.find((item) => item.questionId === answer.questionId && item.site === answer.site);
 
     const result = await callModelForJson(
       {
@@ -263,7 +263,7 @@ export async function findCandidateOnStackExchange(
       kind: "candidate",
       candidate: {
         artifact: result.value.extracted_solution,
-        provenance: "math_stack_exchange",
+        provenance: answer.site === "mathoverflow.net" ? "math_overflow" : "math_stack_exchange",
         sources,
         attribution: {
           line: attributionLine({
@@ -342,7 +342,7 @@ export async function prepareReference(input: PreparationInput): Promise<Prepara
         attribution: { line: "Worked solution supplied by the learner." },
       };
     } else {
-      // Math Stack Exchange first; self-solving only after that attempt fails.
+      // Search MathOverflow, then Math Stack Exchange; self-solving comes last.
       stage = "searching";
       promptVersions.search_queries = searchQueryPrompt.version;
       promptVersions.mse_match = mseMatchPrompt.version;
@@ -355,14 +355,14 @@ export async function prepareReference(input: PreparationInput): Promise<Prepara
         // the learner is told which one happened.
         searchNote =
           found.kind === "unavailable"
-            ? "Math Stack Exchange could not be reached, so a solution was constructed instead."
-            : "No matching Math Stack Exchange answer was found, so a solution was constructed instead.";
+            ? "MathOverflow and Math Stack Exchange could not be reached, so a solution was constructed instead."
+            : "No matching MathOverflow or Math Stack Exchange answer was found, so a solution was constructed instead.";
         stage = "self_solving";
         candidate = {
           artifact: await solveFromScratch(input.statement, input.budget, usage),
           provenance: "ai_generated",
           sources: [],
-          attribution: { line: "Solution constructed by the application after searching Math Stack Exchange." },
+          attribution: { line: "Solution constructed by the application after searching MathOverflow and Math Stack Exchange." },
         };
       }
     }

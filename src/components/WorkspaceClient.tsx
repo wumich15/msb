@@ -45,6 +45,7 @@ interface AssistantState {
 }
 
 interface IdeaState {
+  problemCategories: string[];
   safeTags: string[];
   ideaIds: string[];
   mechanism: string | null;
@@ -138,6 +139,7 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [recommendationState, setRecommendationState] = useState<string | null>(null);
   const [panel, setPanel] = useState<Panel>("notes");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [assistantCollapsed, setAssistantCollapsed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
@@ -153,6 +155,7 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
   const [workedSolution, setWorkedSolution] = useState("");
   const [revealedReference, setRevealedReference] = useState<RevealedReference | null>(null);
   const [preparationJobId, setPreparationJobId] = useState<string | null>(null);
+  const [classificationJobId, setClassificationJobId] = useState<string | null>(null);
   const [chatJobId, setChatJobId] = useState<string | null>(null);
   const [recommendationJobId, setRecommendationJobId] = useState<string | null>(null);
   const [exportJobId, setExportJobId] = useState<string | null>(null);
@@ -227,6 +230,7 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
     setRevealedReference(null);
     for (const job of result.activeJobs ?? []) {
       if (job.type === "prepare-reference") setPreparationJobId(job.id);
+      if (job.type === "classify-problem") setClassificationJobId(job.id);
       if (job.type === "respond-to-question") setChatJobId(job.id);
       if (job.type === "recommend-problems") setRecommendationJobId(job.id);
     }
@@ -257,7 +261,6 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
   }, [loadProblem]);
 
   useEffect(() => {
-    clearAllRecoveryDrafts(userId);
     void loadWorkspace();
   }, [loadWorkspace, userId]);
 
@@ -321,6 +324,12 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
     if (job.state !== "SUCCEEDED") setNotice(`The assistant could not answer: ${job.errorCode ?? job.state}. Your question is kept in the conversation.`);
   }, [loadMessages, problemId]);
 
+  const onClassificationTerminal = useCallback((job: JobStatus) => {
+    setClassificationJobId(null);
+    if (problemId) void loadProblem(problemId);
+    if (job.state !== "SUCCEEDED") setNotice(`Solution classification ended: ${job.errorCode ?? job.state}.`);
+  }, [loadProblem, problemId]);
+
   const onRecommendationTerminal = useCallback((job: JobStatus) => {
     setRecommendationJobId(null);
     if (job.state === "SUCCEEDED") void fetchSimilar(false);
@@ -342,6 +351,7 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
   }, [exportId]);
 
   const preparationJob = useJobPolling(preparationJobId, onPreparationTerminal);
+  const classificationJob = useJobPolling(classificationJobId, onClassificationTerminal);
   const chatJob = useJobPolling(chatJobId, onChatTerminal);
   const recommendationJob = useJobPolling(recommendationJobId, onRecommendationTerminal);
   const exportJob = useJobPolling(exportJobId, onExportTerminal);
@@ -511,6 +521,44 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
     }
   }
 
+  async function researchRelatedProblems() {
+    if (!problemId || !detail?.assistant || !(await flushEditors())) return;
+    const hasSolutionProfile = detail.ideas &&
+      !detail.ideas.isProvisional &&
+      ["checked_reference", "user_supplied_work"].includes(detail.ideas.evidenceKind);
+    if (hasSolutionProfile) {
+      await fetchSimilar(false);
+      return;
+    }
+    if (!aiDisclosureAccepted) {
+      setNotice("Read and accept the AI disclosure before starting related-problem research.");
+      return;
+    }
+    try {
+      if (!detail.assistant.enabled) {
+        await api(`/api/problems/${problemId}/assistant`, { method: "POST", json: { enabled: true } });
+      }
+      const choice = workedSolution.trim() ? "provide" : "find";
+      const result = await api<{ jobId: string | null }>(`/api/problems/${problemId}/reference`, {
+        method: "POST",
+        json: {
+          choice,
+          expectedStatementVersion: statement.revision,
+          researchRelated: true,
+          ...(choice === "provide" ? { workedSolution } : {}),
+        },
+      });
+      setWorkedSolution("");
+      if (result.jobId) setPreparationJobId(result.jobId);
+      setNotice(choice === "provide"
+        ? "Checking your solution before researching related MathNet problems."
+        : "Looking for a solution before researching related MathNet problems.");
+      await loadProblem(problemId);
+    } catch (error) {
+      setNotice(errorMessage(error));
+    }
+  }
+
   function attachSelection() {
     const textarea = notesRef.current;
     if (!textarea) return;
@@ -654,7 +702,7 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
       {!aiDisclosureAccepted ? (
         <section className="disclosure" aria-labelledby="ai-disclosure-title">
           <h2 id="ai-disclosure-title">Before using AI help</h2>
-          <p>AI providers receive the current problem and the notes attached to your question. Math Stack Exchange receives only search terms made from the problem statement. Notes, statuses, and exports work without AI.</p>
+          <p>AI providers receive the current problem and the notes attached to your question. MathOverflow and Math Stack Exchange receive only search terms made from the problem statement. Notes, statuses, and exports work without AI.</p>
           <label><input type="checkbox" checked={automaticRecommendations} onChange={(event) => setAutomaticRecommendations(event.target.checked)} /> Automatic idea tags and recommendations</label>{" "}
           <button type="button" onClick={() => void acceptDisclosure()}>I understand</button>
         </section>
@@ -668,9 +716,13 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
         ))}
       </nav>
 
-      <main className="workspace" data-assistant-collapsed={assistantCollapsed}>
+      <main className="workspace" data-sidebar-collapsed={sidebarCollapsed} data-assistant-collapsed={assistantCollapsed}>
         <aside className="panel panel-projects" hidden={tabbedLayout && panel !== "projects"} aria-label="Math projects">
-          <h2>Math projects</h2>
+          <div className="section-heading sidebar-heading">
+            {sidebarCollapsed ? null : <h2>Math projects</h2>}
+            <button type="button" aria-label={sidebarCollapsed ? "Expand project sidebar" : "Collapse project sidebar"} onClick={() => setSidebarCollapsed((value) => !value)}>{sidebarCollapsed ? "+" : "−"}</button>
+          </div>
+          {sidebarCollapsed ? null : <>
           <form onSubmit={createFolder} className="compact-form">
             <label htmlFor="new-folder">New project</label>
             <input id="new-folder" value={newFolderName} onChange={(event) => setNewFolderName(event.target.value)} maxLength={120} placeholder="Olympiad algebra" />
@@ -718,6 +770,7 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
               ))}
             </ul>
           )}
+          </>}
         </aside>
 
         <section className="panel panel-editor" hidden={tabbedLayout && panel !== "notes"} aria-label="Problem and notes">
@@ -725,18 +778,24 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
             <>
               <div className="problem-heading">
                 <input aria-label="Problem title" value={detail.problem.title} onChange={(event) => setDetail({ ...detail, problem: { ...detail.problem, title: event.target.value } })} onBlur={(event) => void saveMetadata({ title: event.target.value })} />
-                <select aria-label="Move problem to project" value={detail.problem.folderId} onChange={(event) => void saveMetadata({ folderId: event.target.value })}>
-                  {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
-                </select>
                 <select aria-label="Problem status" value={detail.problem.status} onChange={(event) => void changeStatus(event.target.value as ProblemStatus)}>
                   {Object.entries(STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                 </select>
-                <button type="button" onClick={() => void deleteProblem()}>Delete problem</button>
               </div>
+              <details className="problem-settings">
+                <summary>Problem settings</summary>
+                <div className="button-row">
+                  <label htmlFor="problem-project">Project</label>
+                  <select id="problem-project" value={detail.problem.folderId} onChange={(event) => void saveMetadata({ folderId: event.target.value })}>
+                    {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
+                  </select>
+                  <button type="button" onClick={() => void deleteProblem()}>Delete problem</button>
+                </div>
+              </details>
 
-              <section>
+              <section className="problem-statement-section">
                 <h2>Problem statement</h2>
-                <p className="scope-note">Paste a typed, English, text-complete problem. Use LaTeX between <code>$...$</code> or <code>$$...$$</code>. Diagrams and uploads are not interpreted.</p>
+                <details className="editor-help"><summary>Formatting help</summary><p>Paste a typed, English, text-complete problem. Use LaTeX between <code>$...$</code> or <code>$$...$$</code>. Diagrams and uploads are not interpreted.</p></details>
                 <div className="editor-tabs" role="tablist" aria-label="Problem statement editor">
                   <button type="button" role="tab" aria-selected={statementTab === "write"} onClick={() => setStatementTab("write")}>Write</button>
                   <button type="button" role="tab" aria-selected={statementTab === "preview"} onClick={() => setStatementTab("preview")}>Preview</button>
@@ -746,7 +805,7 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
                 {statement.state === "conflict" ? <button type="button" onClick={statement.resolveConflictKeepingMine}>Keep my draft and retry</button> : null}
               </section>
 
-              <section>
+              <section className="notes-section">
                 <div className="section-heading"><h2>Notes</h2><button type="button" onClick={attachSelection}>Ask about selection</button></div>
                 <div className="editor-tabs" role="tablist" aria-label="Notes editor">
                   <button type="button" role="tab" aria-selected={editorTab === "write"} onClick={() => setEditorTab("write")}>Write</button>
@@ -762,14 +821,17 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
               {detail.ideas ? (
                 <section className="idea-summary">
                   <h2>Solution ideas</h2>
+                  {detail.ideas.problemCategories.length > 0 ? <p><strong>MathNet category:</strong> {detail.ideas.problemCategories.join(", ")}</p> : null}
                   <p>{detail.ideas.ideaIds.length > 0 ? detail.ideas.ideaIds.join(", ") : detail.ideas.safeTags.join(", ") || "No safe idea tags yet."}</p>
                   {detail.ideas.mechanism ? <p>{detail.ideas.mechanism}</p> : null}
                 </section>
               ) : null}
 
               <section>
-                <div className="section-heading"><h2>Similar problems</h2><button type="button" onClick={() => void fetchSimilar(false)}>Find similar problems</button></div>
-                {recommendationJob ? <p role="status">Finding related problems: {recommendationJob.stage ?? recommendationJob.state}</p> : null}
+                <div className="section-heading"><h2>Related problems research</h2><button type="button" disabled={Boolean(preparationJobId || classificationJobId || recommendationJobId)} onClick={() => void researchRelatedProblems()}>{workedSolution.trim() ? "Use solution & research" : "Research related problems"}</button></div>
+                <p className="scope-note">Searches within the same MathNet problem category, then compares the key ideas in checked solutions.</p>
+                {classificationJob ? <p role="status">Categorizing the checked solution: {classificationJob.stage ?? classificationJob.state}</p> : null}
+                {recommendationJob ? <p role="status">Researching related problems: {recommendationJob.stage ?? recommendationJob.state}</p> : null}
                 {recommendationState === "NO_MATCH" ? <p className="empty-state">No confident match was found.</p> : null}
                 <ul className="recommendation-list">
                   {recommendations.map((item) => (

@@ -66,6 +66,7 @@ export const recommendProblemsFunction = inngest.createFunction(
       userId,
       statement: context.statement?.statement_markdown ?? "",
       statementVersion: context.problem.current_statement_version,
+      problemCategories: profile?.problem_categories ?? [],
       ideaIds: profile?.idea_ids ?? [],
       mechanism: profile?.mechanism ?? null,
       // Without checked solution evidence, every result is labelled tentative.

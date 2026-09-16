@@ -48,6 +48,7 @@ export const referenceChoiceSchema = z
     expectedStatementVersion: z.number().int().min(0),
     // Required when the learner supplies their own worked solution.
     workedSolution: z.string().max(60_000).optional(),
+    researchRelated: z.boolean().default(false),
   })
   .refine((value) => value.choice !== "provide" || (value.workedSolution ?? "").trim().length > 0, {
     message: "Paste the worked solution, or choose to have one found for you.",

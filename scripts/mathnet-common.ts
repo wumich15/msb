@@ -45,8 +45,8 @@ export async function loadSourceRows(file: string): Promise<SourceRow[]> {
 }
 
 export function normalizeRow(row: SourceRow, index: number): NormalizedMathnetRow {
-  const statement = text(row, ["statement", "problem", "question", "problem_statement", "text"]) ?? "";
-  const solution = text(row, ["solution", "answer", "proof", "solution_text"]);
+  const statement = text(row, ["problem_markdown", "statement", "problem", "question", "problem_statement", "text"]) ?? "";
+  const solution = solutionText(row);
   const language = text(row, ["language", "lang"]);
   const license = text(row, ["license", "licence", "rights"]);
   const sourceId = String(text(row, ["id", "source_id", "problem_id", "uuid"]) ?? index + 1);
@@ -79,7 +79,7 @@ export function normalizeRow(row: SourceRow, index: number): NormalizedMathnetRo
     language,
     country: text(row, ["country"]),
     competition: text(row, ["competition", "contest", "source"]),
-    topics: stringList(row, ["topics", "tags", "subject"]),
+    topics: stringList(row, ["topics_flat", "topics", "tags", "subject"]),
     problemType: text(row, ["problem_type", "type"]),
     license,
     sourceUrl,
@@ -109,6 +109,15 @@ function text(row: SourceRow, keys: string[]): string | null {
 
 function boolean(row: SourceRow, keys: string[]): boolean {
   return keys.some((key) => row[key] === true || row[key] === 1 || row[key] === "true");
+}
+
+function solutionText(row: SourceRow): string | null {
+  const direct = text(row, ["solution", "answer", "proof", "solution_text"]);
+  if (direct) return direct;
+  const solutions = row.solutions_markdown;
+  if (!Array.isArray(solutions)) return null;
+  const usable = solutions.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+  return usable.length > 0 ? usable.join("\n\n---\n\n") : null;
 }
 
 function stringList(row: SourceRow, keys: string[]): string[] {

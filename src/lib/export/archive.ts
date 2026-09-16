@@ -156,6 +156,7 @@ function serializeProblem(problem: ProblemRow, input: ArchiveInput) {
       created_at: message.created_at,
     })),
     idea_classifications: profiles.map((profile) => ({
+      problem_categories: profile.problem_categories ?? [],
       // Solution-derived tags stay hidden unless completion or an explicit choice reveals them.
       idea_ids: showIdeas ? profile.idea_ids : [],
       idea_labels: showIdeas ? profile.idea_ids.map(ideaLabel) : [],

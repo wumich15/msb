@@ -66,6 +66,8 @@ export const tutorResponseSchema = z.object({
 export type TutorResponseSchema = z.infer<typeof tutorResponseSchema>;
 
 export const ideaProfileSchema = z.object({
+  /** Statement-level MathNet topic roots; deliberately separate from solution ideas. */
+  problem_categories: z.array(z.enum(["algebra", "combinatorics", "geometry", "number theory"])).max(2).default([]),
   /** Roughly one to three main ideas, drawn from the controlled vocabulary. */
   idea_ids: z.array(z.string()).max(3).default([]),
   secondary_idea_ids: z.array(z.string()).max(3).default([]),

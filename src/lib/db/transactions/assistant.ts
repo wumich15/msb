@@ -236,6 +236,7 @@ export async function setPreparationChoice(
   choice: PreparationChoice,
   expectedStatementVersion: number | null,
   submittedText: string | null,
+  researchRelated = false,
 ): Promise<PreparationChoiceResult> {
   return runTransaction(async (tx) => {
     const problem = await requireProblemInTx(tx, problemId, userId);
@@ -353,7 +354,7 @@ export async function setPreparationChoice(
       userId,
       jobType: "prepare-reference",
       problemId,
-      input: { choice, reference_id: referenceId },
+      input: { choice, reference_id: referenceId, related_research: researchRelated },
       idempotencyKey,
       activationGeneration: activation,
       preparationGeneration: preparation,

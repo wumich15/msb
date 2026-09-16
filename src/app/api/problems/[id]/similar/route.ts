@@ -59,6 +59,7 @@ export const POST = route(async (request: Request, { params }: Params) => {
       userId,
       statement: statement?.statement_markdown ?? "",
       statementVersion: problem.current_statement_version,
+      problemCategories: ideaProfile?.problem_categories ?? [],
       ideaIds: ideaProfile?.idea_ids ?? [],
       mechanism: ideaProfile?.mechanism ?? null,
       hasSolutionEvidence: ideaProfile?.evidence_kind === "checked_reference" || ideaProfile?.evidence_kind === "user_supplied_work",

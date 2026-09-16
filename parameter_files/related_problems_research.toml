@@ -1,0 +1,3 @@
+# Related Problems Research parameters.
+# Intentionally empty. Provider/query/retrieval limits are already centralized in
+# src/lib/config.ts; duplicating them here would create a second source of truth.

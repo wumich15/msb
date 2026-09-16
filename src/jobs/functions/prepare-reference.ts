@@ -148,7 +148,7 @@ export const prepareReferenceFunction = inngest.createFunction(
       userId,
       jobType: "classify-problem",
       problemId,
-      input: { reason: "reference_ready", reference_id: stored.id },
+      input: { reason: "reference_ready", reference_id: stored.id, recommend_after: job.input.related_research === true },
       idempotencyKey: `classify:reference:${stored.id}`,
       activationGeneration: job.activation_generation,
       preparationGeneration: job.preparation_generation,

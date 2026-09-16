@@ -70,3 +70,4 @@ PRODUCTION-READY
   a create request is in flight, and the per-project count exposes its unit to screen readers via
   `.visually-hidden` text instead of an `aria-label` on a roleless `<span>`. Typecheck, lint, and
   the 19 unit tests pass.
+- 2026-09-16: Added an accessible desktop collapse control and matching compact grid state so the project sidebar can be hidden without affecting the narrow-screen panel tabs.
