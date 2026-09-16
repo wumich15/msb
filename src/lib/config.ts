@@ -26,7 +26,7 @@ export const publicConfig = {
     authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN ?? "",
     projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ?? "",
     appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID ?? "",
-    /** e.g. http://127.0.0.1:9099 during local development; empty in production. */
+    /** e.g. http://127.0.0.1:10009 during local development; empty in production. */
     authEmulatorUrl: process.env.NEXT_PUBLIC_FIREBASE_AUTH_EMULATOR_URL ?? "",
   },
 };

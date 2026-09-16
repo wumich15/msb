@@ -7,10 +7,10 @@
     "rules": "storage.rules"
   },
   "emulators": {
-    "auth": { "port": 9099 },
-    "firestore": { "port": 8080 },
-    "storage": { "port": 9199 },
-    "ui": { "enabled": true, "port": 4000 },
+    "auth": { "port": 10009 },
+    "firestore": { "port": 3080 },
+    "storage": { "port": 2199 },
+    "ui": { "enabled": true, "port": 6050 },
     "singleProjectMode": true
   }
 }

@@ -21,7 +21,7 @@ for the AI-backed features.
 1. Copy `.env.example` to `.env.local`. The defaults point at the emulators with
    the demo project `demo-math-study-buddy`; no Firebase credentials are needed.
 2. Run `npm install`, then `npm run emulators` (Auth, Firestore, Storage, and the
-   Emulator UI at `http://localhost:4000`).
+   Emulator UI at `http://localhost:6050`).
 3. Run `npm run dev`, and `npm run inngest:dev` in a second terminal. Configure
    Inngest to serve the app endpoint at `/api/inngest`.
 4. Open `http://localhost:3000`. Sign-in links sent by the Auth emulator are
