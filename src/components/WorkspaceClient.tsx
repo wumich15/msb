@@ -143,6 +143,8 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
   const [notice, setNotice] = useState<string | null>(null);
   const [newFolderName, setNewFolderName] = useState("");
   const [newProblemTitle, setNewProblemTitle] = useState("");
+  // Which sidebar add form has a request in flight, so neither can be submitted twice.
+  const [creating, setCreating] = useState<"folder" | "problem" | null>(null);
   const [statusFilter, setStatusFilter] = useState<"all" | ProblemStatus>("all");
   const [editorTab, setEditorTab] = useState<"write" | "preview">("write");
   const [statementTab, setStatementTab] = useState<"write" | "preview">("write");
@@ -359,15 +361,20 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
 
   async function createFolder(event: React.FormEvent) {
     event.preventDefault();
-    if (!newFolderName.trim() || !(await flushEditors())) return;
+    // The guard plus the disabled button keep a double submit from creating twin projects.
+    if (creating || !newFolderName.trim()) return;
+    setCreating("folder");
     setNotice(null);
     try {
+      if (!(await flushEditors())) return;
       const result = await api<{ folder: Folder }>("/api/folders", { method: "POST", json: { name: newFolderName } });
       setFolders((current) => [...current, result.folder]);
       setFolderId(result.folder.id);
       setNewFolderName("");
     } catch (error) {
       setNotice(errorMessage(error));
+    } finally {
+      setCreating(null);
     }
   }
 
@@ -402,9 +409,11 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
 
   async function createProblem(event: React.FormEvent) {
     event.preventDefault();
-    if (!folderId || !newProblemTitle.trim() || !(await flushEditors())) return;
+    if (creating || !folderId || !newProblemTitle.trim()) return;
+    setCreating("problem");
     setNotice(null);
     try {
+      if (!(await flushEditors())) return;
       const result = await api<{ problem: ProblemSummary }>("/api/problems", {
         method: "POST",
         json: { folderId, title: newProblemTitle, statement: "" },
@@ -418,6 +427,8 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
       setPanel("notes");
     } catch (error) {
       setNotice(errorMessage(error));
+    } finally {
+      setCreating(null);
     }
   }
 
@@ -663,17 +674,22 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
           <form onSubmit={createFolder} className="compact-form">
             <label htmlFor="new-folder">New project</label>
             <input id="new-folder" value={newFolderName} onChange={(event) => setNewFolderName(event.target.value)} maxLength={120} placeholder="Olympiad algebra" />
-            <button type="submit" disabled={!newFolderName.trim()}>Add project</button>
+            <button type="submit" disabled={creating !== null || !newFolderName.trim()}>{creating === "folder" ? "Adding…" : "Add project"}</button>
           </form>
           {folders.length === 0 ? <p className="empty-state">Create a project to begin.</p> : (
             <ul className="tree-list">
-              {folders.map((folder) => (
-                <li key={folder.id}>
-                  <button className="row-button" type="button" aria-current={folder.id === folderId} onClick={() => setFolderId(folder.id)}>
-                    {folder.name} <span className="row-count" aria-label={`${problemCounts.get(folder.id) ?? 0} problems`}>{problemCounts.get(folder.id) ?? 0}</span>
-                  </button>
-                </li>
-              ))}
+              {folders.map((folder) => {
+                const count = problemCounts.get(folder.id) ?? 0;
+                return (
+                  <li key={folder.id}>
+                    <button className="row-button" type="button" aria-current={folder.id === folderId} onClick={() => setFolderId(folder.id)}>
+                      {folder.name}{" "}
+                      {/* A bare number reads as noise to a screen reader, so the unit is spoken but not shown. */}
+                      <span className="row-count">{count}<span className="visually-hidden">{count === 1 ? " problem" : " problems"}</span></span>
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           )}
           {folderId ? <div className="button-row"><button type="button" onClick={() => void renameFolder()}>Rename</button><button type="button" onClick={() => void deleteFolder()}>Delete</button></div> : null}
@@ -681,7 +697,7 @@ export default function WorkspaceClient({ userId, email }: { userId: string; ema
           <form onSubmit={createProblem} className="compact-form">
             <label htmlFor="new-problem">{selectedFolder ? `New problem in ${selectedFolder.name}` : "New problem"}</label>
             <input id="new-problem" value={newProblemTitle} onChange={(event) => setNewProblemTitle(event.target.value)} maxLength={300} disabled={!folderId} placeholder="Problem title" />
-            <button type="submit" disabled={!folderId || !newProblemTitle.trim()}>Add problem</button>
+            <button type="submit" disabled={creating !== null || !folderId || !newProblemTitle.trim()}>{creating === "problem" ? "Adding…" : "Add problem"}</button>
           </form>
           {folderId ? <p className="scope-note">The problem opens empty — paste its statement in the notes panel.</p> : <p className="scope-note">Choose or create a project first; every problem lives in one.</p>}
           <label htmlFor="status-filter">Show</label>{" "}

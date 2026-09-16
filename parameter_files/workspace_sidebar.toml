@@ -1,0 +1,16 @@
+# Workspace Sidebar parameters.
+#
+# Intentionally empty. The sidebar's two candidate tunables both belong elsewhere:
+#
+#   * The 900px narrow-layout breakpoint is declared in a CSS media query in
+#     src/app/globals.css and mirrored by NARROW_LAYOUT_QUERY in
+#     src/hooks/useMediaQuery.ts. CSS cannot read this file, so moving the number here
+#     would add a third copy rather than centralize the existing two.
+#
+#   * The project-name (120) and problem-title (300) length limits are enforced by
+#     folderCreateSchema and problemCreateSchema in src/lib/validation.ts. The server
+#     interprets and acts on them; the sidebar only mirrors them as input maxLength
+#     hints, so they belong to the validation layer's parameters, not the sidebar's.
+#
+# Everything else in the sidebar is UI copy or layout detail, which the profile keeps in
+# source rather than promoting to configuration.
