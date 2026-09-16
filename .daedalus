@@ -1,0 +1,7 @@
+# Worktree provisioning for Daedalus task isolation.
+# node_modules/ is gitignored, so a fresh task worktree has no dependencies and
+# `npm test` (vitest run) fails with "vitest: command not found". Install from
+# the lockfile in each worktree before the agent starts.
+[worktree]
+install_command = ["npm", "ci"]
+readonly_paths = []
