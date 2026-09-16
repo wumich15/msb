@@ -26,6 +26,7 @@ next-env.d.ts
 
 # Test and tooling output
 coverage/
+.pytest_cache/
 test-results/
 playwright-report/
 blob-report/

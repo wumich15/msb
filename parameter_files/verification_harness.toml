@@ -1,0 +1,5 @@
+# Verification Harness parameters.
+#
+# The pytest shim has nothing to tune: the exit status it rewrites is fixed by
+# pytest itself, and which commands run is decided by the verification pipeline
+# rather than by this repository. Kept for consistency with the feature file.
